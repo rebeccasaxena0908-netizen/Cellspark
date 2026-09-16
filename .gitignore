@@ -1,0 +1,28 @@
+# Python
+backend/venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Large reference data — see backend/data/README.md for download commands
+backend/data/*.fasta
+backend/data/*.fasta.gz
+backend/data/*.maf
+backend/data/*.vcf
+backend/data/*.tar.gz
+backend/data/skcm_all_mutations.json
+backend/data/skcm_tcga_pan_can_atlas_2018/
+backend/data/chroma/
+
+# Generated outputs
+backend/tier1_output.json
+validation_results/
+
+# OS / editor
+.DS_Store
+.vscode/
+*.log

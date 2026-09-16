@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+/* Palette sampled from the reference video:
+   deep navy void, cyan binary rain, violet/blue helix */
+@theme {
+  --color-void:    #060A14;
+  --color-abyss:   #0A1120;
+  --color-panel:   #0E1729;
+  --color-raised:  #14203A;
+  --color-line:    #1E2E4D;
+
+  --color-cyan-glow:   #7DD3FC;
+  --color-cyan-core:   #38BDF8;
+  --color-violet-glow: #C4A9F5;
+  --color-violet-core: #A78BFA;
+
+  --color-ink:      #E6EDF7;
+  --color-ink-dim:  #93A6C4;
+  --color-ink-mute: #5F7391;
+
+  --color-ok:    #34D399;
+  --color-warn:  #FBBF24;
+  --color-alert: #F87171;
+
+  --font-display: "Sora", ui-sans-serif, system-ui, sans-serif;
+  --font-sans:    "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono:    "IBM Plex Mono", ui-monospace, monospace;
+}
+
+html, body, #root { height: 100%; }
+
+body {
+  background: var(--color-void);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-cyan-core);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--color-abyss); }
+::-webkit-scrollbar-thumb {
+  background: var(--color-raised);
+  border-radius: 6px;
+  border: 2px solid var(--color-abyss);
+}
+
+@keyframes cs-fade-up {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes cs-pulse-ring {
+  0%   { box-shadow: 0 0 0 0 rgba(56,189,248,.45); }
+  70%  { box-shadow: 0 0 0 12px rgba(56,189,248,0); }
+  100% { box-shadow: 0 0 0 0 rgba(56,189,248,0); }
+}
+
+.cs-fade-up { animation: cs-fade-up .55s cubic-bezier(.2,.7,.3,1) both; }
+.cs-pulse   { animation: cs-pulse-ring 2s ease-out infinite; }
+
+/* Anything that moves stops when the user's system asks it to */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+}

@@ -1,0 +1,38 @@
+Building benchmark proteome...
+  <ProteomeIndex 2,000 proteins, 998,602 residues>
+
+PROTEIN ALPHABET (20 chars), 9-mers, 150 peptides
+  Algorithm               Total (s)   ms/peptide
+  ---------------------- ---------- ------------
+  Knuth-Morris-Pratt         5.7999       38.666
+  Boyer-Moore                3.4084       22.723
+  Naive baseline             6.8915       45.944
+  Python built-in (C)        0.0828        0.552
+
+  KMP vs naive         : 1.19x
+  Boyer-Moore vs naive : 2.02x
+  Faster of the two    : Boyer-Moore
+
+PROTEIN ALPHABET (20 chars), 20-mers, 150 peptides
+  Algorithm               Total (s)   ms/peptide
+  ---------------------- ---------- ------------
+  Knuth-Morris-Pratt         5.7669       38.446
+  Boyer-Moore                1.9438       12.959
+  Naive baseline             6.9006       46.004
+  Python built-in (C)        0.0393        0.262
+
+  KMP vs naive         : 1.20x
+  Boyer-Moore vs naive : 3.55x
+  Faster of the two    : Boyer-Moore
+
+DNA ALPHABET (4 chars), 15-mers, 150 peptides
+  Algorithm               Total (s)   ms/peptide
+  ---------------------- ---------- ------------
+  Knuth-Morris-Pratt         2.9021       19.347
+  Boyer-Moore                2.1908       14.605
+  Naive baseline             3.5952       23.968
+  Python built-in (C)        0.0745        0.497
+
+  KMP vs naive         : 1.24x
+  Boyer-Moore vs naive : 1.64x
+  Faster of the two    : Boyer-Moore
