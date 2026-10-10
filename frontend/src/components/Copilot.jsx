@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { askCopilot } from "../lib/mockApi";
 import { Panel } from "./ui";
+import { Evidence } from "./Passages";
 
 const SUGGESTIONS = [
   "What does IC50 mean here?",
@@ -33,7 +34,16 @@ export default function Copilot({ result }) {
     setMessages((m) => [...m, { role: "user", text: q }]);
     setBusy(true);
     const res = await askCopilot(q, result);
-    setMessages((m) => [...m, { role: "assistant", text: res.answer, sources: res.sources }]);
+    setMessages((m) => [
+      ...m,
+      {
+        role: "assistant",
+        text: res.answer,
+        sources: res.sources,
+        passages: res.passages,
+        provider: res.provider,
+      },
+    ]);
     setBusy(false);
   }
 
@@ -56,14 +66,21 @@ export default function Copilot({ result }) {
                   : "border border-line bg-abyss/70 text-ink-dim"
               }`}
             >
-              <p>{m.text}</p>
-              {m.sources?.length > 0 && (
+              <p className="whitespace-pre-wrap">{m.text}</p>
+
+              {/* The expandable passages supersede the flat citation list —
+                  same sources, plus the text each one actually contributed.
+                  The flat list stays for the offline path, which has
+                  citations but no retrieved passages to expand. */}
+              {m.passages?.length > 0 ? null : m.sources?.length > 0 && (
                 <ul className="mt-3 space-y-1 border-t border-line pt-2">
                   {m.sources.map((s) => (
                     <li key={s} className="text-[11px] text-ink-mute">↳ {s}</li>
                   ))}
                 </ul>
               )}
+
+              <Evidence provider={m.provider} passages={m.passages} />
             </div>
           </div>
         ))}

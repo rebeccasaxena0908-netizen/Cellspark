@@ -21,6 +21,7 @@ server start.
 
 import json
 import os
+import re
 from functools import lru_cache
 from typing import Any, Dict, List
 
@@ -119,3 +120,62 @@ def corpus_info() -> Dict[str, Any]:
         }
     except Exception as e:
         return {"available": False, "error": str(e)}
+
+def retrieve_mentioning(symbol: str, query: str, k: int = 6) -> List[Dict[str, Any]]:
+    """
+    Retrieve only passages that literally contain `symbol`, ranked by `query`.
+
+    WHY THIS EXISTS ALONGSIDE retrieve():
+    Dense retrieval is the right tool for "what is this question about" and the
+    wrong one for "does our index mention KRAS". Embeddings match meaning, not
+    tokens, so a query built around a gene symbol happily returns six strongly
+    similar abstracts about neoantigens in general and none that name the gene
+    — measured on this corpus, a KRAS query with context terms scored 0.597
+    similarity while mentioning KRAS in zero of six results.
+
+    So this filters on the symbol first (Chroma's substring `$contains`) and
+    lets similarity rank what survives. The substring test is then tightened to
+    a word boundary, because `$contains` alone matches MET inside METABOLIC.
+
+    Returns [] when the corpus genuinely does not mention the symbol — which is
+    a fact about the index, and the caller is responsible for saying so without
+    implying anything about the gene.
+    """
+    symbol = (symbol or "").strip()
+    if not symbol:
+        return []
+
+    col = get_collection()
+    try:
+        res = col.query(
+            query_texts=[query or symbol],
+            n_results=k,
+            where_document={"$contains": symbol},
+        )
+    except Exception:
+        # A backend without document filtering shouldn't take the feature down.
+        return []
+
+    if not res["ids"] or not res["ids"][0]:
+        return []
+
+    # Gene symbols are uppercase and several are also English words, so the
+    # match has to respect word boundaries and case.
+    word = re.compile(r"\b" + re.escape(symbol) + r"\b")
+
+    out = []
+    for i in range(len(res["ids"][0])):
+        text = res["documents"][0][i]
+        if not word.search(text):
+            continue
+        meta = res["metadatas"][0][i]
+        out.append({
+            "pmid": meta["pmid"],
+            "title": meta["title"],
+            "journal": meta.get("journal", ""),
+            "year": meta.get("year", ""),
+            "text": text,
+            "similarity": round(1 - res["distances"][0][i], 3),
+            "url": f"https://pubmed.ncbi.nlm.nih.gov/{meta['pmid']}/",
+        })
+    return out

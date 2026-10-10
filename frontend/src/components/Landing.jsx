@@ -211,7 +211,7 @@ export default function Landing({ onStart }) {
 
             <Reveal delay={330}>
               <p className="mt-6 font-mono text-[11px] leading-relaxed text-ink-mute">
-                MAF / VCF in · ranked neoantigens and a synthesis-ready construct out
+                MAF in · ranked neoantigens and a synthesis-ready construct out
               </p>
             </Reveal>
           </div>

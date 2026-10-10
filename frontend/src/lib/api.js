@@ -48,6 +48,13 @@ export function askCopilotApi(question, result) {
   });
 }
 
+export function crossCheckApi(gene, change, result) {
+  return request("/copilot/cross-check", {
+    method: "POST",
+    body: JSON.stringify({ gene, change, result }),
+  });
+}
+
 export function getCorpusInfo() {
   return request("/corpus/info");
 }

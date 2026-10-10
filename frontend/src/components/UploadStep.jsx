@@ -55,8 +55,8 @@ export default function UploadStep({ onRun }) {
       <Panel className="mt-8 p-6">
         <h3 className="font-display text-lg font-semibold">Mutation file</h3>
         <p className="mt-1 text-sm text-ink-dim">
-          Accepts MAF, VCF or FASTA. This is the file your sequencing provider
-          returns after variant calling.
+          Accepts a MAF file — the tab-separated mutation table your sequencing
+          provider returns after variant calling.
         </p>
 
         <div
@@ -87,7 +87,7 @@ export default function UploadStep({ onRun }) {
           <input
             ref={inputRef}
             type="file"
-            accept=".maf,.vcf,.fasta,.fa,.txt,.tsv"
+            accept=".maf,.txt,.tsv"
             className="hidden"
             onChange={(e) => accept(e.target.files?.[0])}
           />

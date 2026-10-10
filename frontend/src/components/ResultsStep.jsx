@@ -34,7 +34,7 @@ export default function ResultsStep({ result, onRestart }) {
       </div>
 
       {/* the single answer, before any detail */}
-      <Panel className="mt-8 p-6">
+      <Panel className="mt-8 p-5">
         <p className="text-[11px] uppercase tracking-wider text-ink-mute">
           Leading candidate
         </p>
@@ -56,15 +56,18 @@ export default function ResultsStep({ result, onRestart }) {
           ["Matched self", stats.selfRejected],
           ["Scored", stats.screened],
         ].map(([label, v]) => (
-          <Panel key={label} className="p-4">
+          <Panel key={label} className="p-5">
             <Stat label={label} value={v.toLocaleString()} />
           </Panel>
         ))}
       </div>
 
-      <div className="mt-6 grid gap-6 lg:grid-cols-5">
-        <div className="space-y-6 lg:col-span-3">
-          <TargetsTable targets={targets} />
+      <div className="mt-6 grid gap-6 lg:grid-cols-3">
+        {/* min-w-0: a grid item defaults to min-width:auto, so without this it
+            refuses to shrink below the targets table's min-content width and
+            the whole page scrolls sideways on a phone. */}
+        <div className="min-w-0 space-y-6 lg:col-span-2">
+          <TargetsTable targets={targets} result={result} />
           <MrnaPanel mrna={mrna} />
 
           <Panel className="p-5">
@@ -95,7 +98,7 @@ export default function ResultsStep({ result, onRestart }) {
           </Panel>
         </div>
 
-        <div className="lg:col-span-2">
+        <div className="min-w-0 lg:col-span-1">
           <Copilot result={result} />
         </div>
       </div>

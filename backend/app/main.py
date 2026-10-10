@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .pipeline import run_pipeline, run_tier1
-from .tier4.copilot import answer as copilot_answer
+from .tier4.copilot import answer as copilot_answer, cross_check as copilot_cross_check
 from .tier4.retriever import corpus_info
 from .upload import save_upload
 
@@ -64,6 +64,20 @@ class PipelineRequest(BaseModel):
 class CopilotRequest(BaseModel):
     question: str = Field(..., description="Clinician's question about the run")
     result: dict = Field(..., description="The pipeline result being asked about")
+    history: Optional[list] = Field(
+        default=None,
+        description=(
+            "Recent conversation turns, oldest first. Optional — the copilot "
+            "answers a single question fine without it. Only the last few "
+            "turns are used."
+        ),
+    )
+
+
+class CrossCheckRequest(BaseModel):
+    gene: str = Field(..., description="Gene symbol, e.g. KRAS")
+    change: str = Field(default="", description="Protein change, e.g. p.G12D")
+    result: dict = Field(default_factory=dict, description="The pipeline result in view")
 
 
 # ------------------------------------------------------------ routes
@@ -125,6 +139,22 @@ def tier1_run(algorithm: str = "kmp", max_mutations: int = 30):
     return run_tier1(algorithm=algorithm, max_mutations=max_mutations)
 
 
+@app.post("/api/copilot/cross-check")
+def copilot_cross_check_route(req: CrossCheckRequest):
+    """
+    Report what the indexed corpus says about one gene and alteration.
+
+    This reports on CellSpark's own ~618-abstract index and nothing more. A
+    gene missing from it is a gap in the index, not a finding about the gene,
+    and the response's "caveat" field says so in every state — the frontend
+    shows it unconditionally.
+    """
+    try:
+        return copilot_cross_check(req.gene, req.change, req.result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Cross-check failed: {e}")
+
+
 @app.get("/api/corpus/info")
 def corpus_status():
     """What literature is indexed, so the UI can report it."""
@@ -138,8 +168,12 @@ def copilot_ask(req: CopilotRequest):
 
     Grounded in two sources: the run's own numbers, and retrieved PubMed
     abstracts. Every response carries its citations.
+
+    The response's "provider" field reports which path produced the answer —
+    the configured model, or the template fallback when generation is
+    unavailable.
     """
     try:
-        return copilot_answer(req.question, req.result)
+        return copilot_answer(req.question, req.result, history=req.history)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Copilot failed: {e}")

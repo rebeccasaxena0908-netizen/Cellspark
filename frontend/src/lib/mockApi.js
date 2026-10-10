@@ -5,7 +5,7 @@
  * versions remain as fallbacks so the UI never dead-ends when the backend is
  * unreachable, and the mock generator still supplies the benchmark table.
  */
-import { runPipelineApi, askCopilotApi } from "./api";
+import { runPipelineApi, askCopilotApi, crossCheckApi } from "./api";
 
 const GENES = ["TP53", "KRAS", "BRAF", "PIK3CA", "PTEN", "EGFR", "NRAS", "APC", "IDH1", "CTNNB1"];
 const AA = "ACDEFGHIKLMNPQRSTVWY".split("");
@@ -106,11 +106,10 @@ export function runPipelineMock({ alleles = [], fileName = "sample.maf" }, onPro
 }
 
 /**
- * Keyword-matched copilot. Fallback only — used when the backend is
- * unreachable or no raw API response is attached to the result.
+ * Keyword-matched answer text. The branches below are the offline fallback's
+ * whole brain — see askCopilotMock, which wraps this.
  */
-export async function askCopilotMock(question, result) {
-  await new Promise((r) => setTimeout(r, 700 + Math.random() * 700));
+function keywordAnswer(question, result) {
   const top = result?.targets?.[0];
   const q = question.toLowerCase();
 
@@ -150,9 +149,31 @@ export async function askCopilotMock(question, result) {
 }
 
 /**
+ * Keyword-matched copilot. Fallback only — used when the backend is
+ * unreachable or no raw API response is attached to the result.
+ *
+ * Returns the same shape as askCopilot, with passages always an array and
+ * provider always a string, so the UI renders one shape and never guards
+ * against undefined. provider "offline" is what tells the user the text they
+ * are reading was simulated in the browser, not generated from retrieval.
+ */
+export async function askCopilotMock(question, result) {
+  await new Promise((r) => setTimeout(r, 700 + Math.random() * 700));
+  return {
+    ...keywordAnswer(question, result),
+    passages: [],
+    provider: "offline",
+  };
+}
+
+/**
  * Real copilot — grounded in the run's own numbers plus retrieved PubMed
  * abstracts. Falls back to the keyword version if the backend is unreachable,
  * so the UI never dead-ends.
+ *
+ * sources stays flattened to display strings for backwards compatibility.
+ * passages and provider pass through untouched: the UI uses them to show which
+ * abstract each citation came from, and which path produced the answer.
  */
 export async function askCopilot(question, result) {
   if (!result?.apiRaw) return askCopilotMock(question, result);
@@ -165,9 +186,39 @@ export async function askCopilot(question, result) {
         (s) => `${s.title} — ${s.journal || "PubMed"} ${s.year} (PMID ${s.pmid})`
       ),
       grounded: r.grounded_in,
+      passages: r.passages ?? [],
+      provider: r.provider ?? "templates",
     };
   } catch {
     return askCopilotMock(question, result);
+  }
+}
+
+/**
+ * Cross-check one target against the indexed corpus.
+ *
+ * Backend-only: there is no offline version, because a simulated literature
+ * lookup would be a fabricated one. With the backend unreachable this reports
+ * that it could not search, which is the truthful answer — and still says
+ * nothing about the gene.
+ */
+export async function crossCheck(gene, change, result) {
+  try {
+    return await crossCheckApi(gene, change, result?.apiRaw ?? {});
+  } catch {
+    return {
+      gene,
+      change,
+      coverage: "unavailable",
+      summary:
+        "The backend is unreachable, so the indexed corpus could not be " +
+        "searched. This says nothing about " + gene + " — the lookup did not run.",
+      passages: [],
+      provider: "offline",
+      caveat:
+        "A cross-check reports only what CellSpark's own small abstract index " +
+        "contains. It is not a literature review and not clinical validation.",
+    };
   }
 }
 

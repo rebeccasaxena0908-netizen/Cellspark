@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Panel, Button } from "./ui";
+import { SequenceChars, SequenceLegend } from "./SequenceLegend";
 
 function Stat({ label, value, unit, tone }) {
   const tones = { ok: "text-ok", warn: "text-warn", alert: "text-alert" };
@@ -75,10 +76,29 @@ export default function MrnaPanel({ mrna }) {
               <span className="mr-3 select-none text-ink-mute">
                 {String(i * 60 + 1).padStart(4, "0")}
               </span>
-              {r}
+              <SequenceChars seq={r} kind="rna" className="text-cyan-glow/85" />
             </div>
           ))}
         </pre>
+      </div>
+
+      {mrna.protein && (
+        <div className="mx-5 mb-5">
+          <p className="text-[11px] uppercase tracking-wider text-ink-mute">
+            Protein it encodes
+          </p>
+          <p className="mt-1.5 break-all text-[13px]">
+            <SequenceChars seq={mrna.protein} kind="protein" />
+          </p>
+          <p className="mt-1.5 text-xs text-ink-mute">
+            Every three bases above spell one of these letters. Hover any letter
+            for its name.
+          </p>
+        </div>
+      )}
+
+      <div className="mx-5 mb-5">
+        <SequenceLegend />
       </div>
 
       <div className="flex flex-wrap gap-3 border-t border-line px-5 py-4">

@@ -1,7 +1,7 @@
 """
 File upload handling.
 
-Accepts a MAF/VCF file from the clinician, validates it's parseable, and
+Accepts a MAF file from the clinician, validates it's parseable, and
 stores it in a temp directory keyed by an upload ID. The pipeline then reads
 from that path instead of the synthetic demo dataset.
 
