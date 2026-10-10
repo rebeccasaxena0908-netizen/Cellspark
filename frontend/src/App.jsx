@@ -1,6 +1,6 @@
 import { useState } from "react";
 import AppBackground from "./components/AppBackground";
-import Hero from "./components/Hero";
+import Landing from "./components/Landing";
 import UploadStep from "./components/UploadStep";
 import RunningStep from "./components/RunningStep";
 import ResultsStep from "./components/ResultsStep";
@@ -58,7 +58,7 @@ export default function App() {
       <>
         <AppBackground />
         <div className="relative z-10">
-          <Hero onStart={() => setView("upload")} />
+          <Landing onStart={() => setView("upload")} />
         </div>
       </>
     );

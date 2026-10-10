@@ -1,24 +1,3 @@
-"""
-Pipeline orchestration — runs the tiers in sequence and shapes the response.
-
-All four tiers are implemented. Tier 4 (the RAG copilot) answers on demand
-through /api/copilot/ask rather than as part of a run, so it isn't invoked
-here.
-
-ORDER OF OPERATIONS (worth explaining in the viva):
-Tolerance screening searches each peptide against 11.4M residues in pure
-Python, which costs roughly 0.3 s per peptide. A real patient produces
-~12,000 candidates, so screening them all would take an hour.
-
-The naive fix — screen the first N — is wrong: peptides arrive in gene order,
-so a cap would filter alphabetically rather than by quality, and a single
-early gene would fill the whole quota.
-
-So we invert the order. MHCflurry scores every candidate (fast, batched
-tensor operations), we rank by binding affinity, and only the shortlist gets
-tolerance-screened. Every peptide we actually propose is fully screened, and
-nothing is filtered by an irrelevant criterion.
-"""
 
 import os
 
