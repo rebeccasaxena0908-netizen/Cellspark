@@ -7,10 +7,20 @@ Run from the backend/ folder:
 
 from typing import List, Literal, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
+from . import auth
+from .db import get_db
+from .models import Researcher
 from .pipeline import run_pipeline, run_tier1
 from .tier4.copilot import answer as copilot_answer, cross_check as copilot_cross_check
 from .tier4.retriever import corpus_info
@@ -31,6 +41,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def scrub_auth_validation_errors(request: Request, exc: RequestValidationError):
+    """
+    FastAPI's default 422 echoes the offending input back, and for a body
+    with a missing field that "input" is the whole body, password included.
+    On auth routes, drop it, so a plaintext password never appears in an
+    error response. Every other route keeps the default behaviour.
+    """
+    if not request.url.path.startswith("/api/auth/"):
+        return await request_validation_exception_handler(request, exc)
+    errors = [
+        {k: v for k, v in err.items() if k not in ("input", "ctx", "url")}
+        for err in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
 
 # ------------------------------------------------------------ schemas
@@ -78,6 +105,18 @@ class CrossCheckRequest(BaseModel):
     gene: str = Field(..., description="Gene symbol, e.g. KRAS")
     change: str = Field(default="", description="Protein change, e.g. p.G12D")
     result: dict = Field(default_factory=dict, description="The pipeline result in view")
+
+
+class SignupRequest(BaseModel):
+    email: str
+    display_name: str
+    password: str
+    institution: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
 
 
 # ------------------------------------------------------------ routes
@@ -177,3 +216,115 @@ def copilot_ask(req: CopilotRequest):
         return copilot_answer(req.question, req.result, history=req.history)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Copilot failed: {e}")
+
+
+# ------------------------------------------------------------ auth
+# Phase 1: accounts only. The pipeline and copilot routes above stay open;
+# phase 2 attaches runs, uploads and chats to the signed-in researcher.
+
+INVALID_LOGIN = "Invalid email or password"
+
+
+@app.post("/api/auth/signup", status_code=201)
+def auth_signup(
+    req: SignupRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Create an account and sign straight in."""
+    try:
+        email = auth.normalise_email(req.email)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    display_name = req.display_name.strip()
+    if not display_name:
+        raise HTTPException(status_code=422, detail="Display name is required.")
+    if len(display_name) > 100:
+        raise HTTPException(status_code=422, detail="Display name must be at most 100 characters.")
+
+    institution = (req.institution or "").strip() or None
+    if institution and len(institution) > 150:
+        raise HTTPException(status_code=422, detail="Institution must be at most 150 characters.")
+
+    problem = auth.password_problem(req.password)
+    if problem:
+        raise HTTPException(status_code=422, detail=problem)
+
+    # Trade-off: this 409 tells the caller the address has an account, which
+    # login deliberately never does. It can't be avoided without email
+    # verification: the person signing up needs to know why it failed.
+    # Login, where enumeration matters most, stays generic.
+    taken = "An account with this email already exists. Sign in instead."
+    if db.execute(select(Researcher.researcher_id).where(Researcher.email == email)).first():
+        raise HTTPException(status_code=409, detail=taken)
+
+    researcher = Researcher(
+        email=email,
+        display_name=display_name,
+        institution=institution,
+        password_hash=auth.hash_password(req.password),
+        last_login_at=func.now(),
+    )
+    db.add(researcher)
+    try:
+        db.flush()
+    except IntegrityError:
+        # Two signups for the same address raced past the check above.
+        db.rollback()
+        raise HTTPException(status_code=409, detail=taken)
+
+    token = auth.create_session(db, researcher, request)
+    db.commit()
+    db.refresh(researcher)
+
+    auth.set_session_cookie(response, token)
+    return auth.public_profile(researcher)
+
+
+@app.post("/api/auth/login")
+def auth_login(
+    req: LoginRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """
+    One message for every failure, whether the email is unknown or the
+    password is wrong. bcrypt runs either way (against a dummy hash for an
+    unknown email), so response time does not reveal which it was.
+    """
+    researcher = db.execute(
+        select(Researcher).where(Researcher.email == auth.lookup_email(req.email))
+    ).scalar_one_or_none()
+
+    ok = auth.verify_password(req.password, researcher.password_hash if researcher else None)
+    if not ok:
+        raise HTTPException(status_code=401, detail=INVALID_LOGIN)
+
+    # Replace rather than accumulate: a cookie already in this browser
+    # belongs to an earlier session, which this login supersedes.
+    auth.delete_session(db, request.cookies.get(auth.COOKIE_NAME))
+
+    researcher.last_login_at = func.now()
+    token = auth.create_session(db, researcher, request)
+    db.commit()
+    db.refresh(researcher)
+
+    auth.set_session_cookie(response, token)
+    return auth.public_profile(researcher)
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request, response: Response, db: Session = Depends(get_db)):
+    """Delete the session row, not just the cookie, so the token is dead."""
+    auth.delete_session(db, request.cookies.get(auth.COOKIE_NAME))
+    db.commit()
+    auth.clear_session_cookie(response)
+    return {"signed_out": True}
+
+
+@app.get("/api/auth/me")
+def auth_me(researcher: Researcher = Depends(auth.require_researcher)):
+    return auth.public_profile(researcher)

@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import AppBackground from "./components/AppBackground";
+import AuthScreen from "./components/AuthScreen";
 import Landing from "./components/Landing";
 import UploadStep from "./components/UploadStep";
 import RunningStep from "./components/RunningStep";
@@ -7,8 +8,9 @@ import ResultsStep from "./components/ResultsStep";
 import BackendStatus from "./components/BackendStatus";
 import LogoMark from "./components/LogoMark";
 import { runPipelineReal } from "./lib/mockApi";
+import { logout, me } from "./lib/auth";
 
-function TopBar({ onHome, stage }) {
+function TopBar({ onHome, stage, user, onSignOut }) {
   return (
     <header className="sticky top-0 z-40 border-b border-line bg-void/70 backdrop-blur-md">
       <div className="mx-auto flex max-w-6xl items-center gap-4 px-6 py-3">
@@ -24,6 +26,20 @@ function TopBar({ onHome, stage }) {
           <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-ink-mute">
             {stage}
           </span>
+          {user && (
+            <div className="flex items-center gap-3 border-l border-line pl-5">
+              <span className="max-w-[12rem] truncate text-sm text-ink-dim" title={user.email}>
+                {user.display_name}
+              </span>
+              <button
+                type="button"
+                onClick={onSignOut}
+                className="rounded-lg border border-line px-3 py-1.5 text-[13px] text-ink-dim transition-colors hover:border-cyan-core/60 hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-core/70 focus-visible:ring-offset-2 focus-visible:ring-offset-void"
+              >
+                Sign out
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </header>
@@ -35,6 +51,30 @@ export default function App() {
   const [tier, setTier] = useState(0);
   const [frac, setFrac] = useState(0);
   const [result, setResult] = useState(null);
+  // undefined = still asking the server, null = signed out, object = signed in
+  const [user, setUser] = useState(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    me()
+      .then((u) => { if (!cancelled) setUser(u); })
+      // Server unreachable: show the sign-in form, which reports the
+      // connection problem itself on submit.
+      .catch(() => { if (!cancelled) setUser(null); });
+    return () => { cancelled = true; };
+  }, []);
+
+  async function signOut() {
+    try {
+      await logout();
+    } catch {
+      /* the cookie may be gone already; sign out locally regardless */
+    }
+    // Drop the previous researcher's result so the next one can't see it.
+    setResult(null);
+    setUser(null);
+    setView("hero");
+  }
 
   async function start(config) {
     setView("running");
@@ -45,7 +85,7 @@ export default function App() {
     setView("results");
   }
 
-  const stage = {
+  const stage = !user ? "Sign in" : {
     hero: "Research use only",
     upload: "Patient details",
     running: "Analysis running",
@@ -68,10 +108,17 @@ export default function App() {
     <>
       <AppBackground />
       <div className="relative z-10 min-h-[100dvh]">
-        <TopBar onHome={() => setView("hero")} stage={stage} />
-        {view === "upload" && <UploadStep onRun={start} />}
-        {view === "running" && <RunningStep tier={tier} frac={frac} />}
-        {view === "results" && result && (
+        <TopBar onHome={() => setView("hero")} stage={stage} user={user} onSignOut={signOut} />
+        {/* The landing page is public; everything past it needs an account. */}
+        {user === undefined && (
+          <p role="status" className="py-24 text-center font-mono text-[11px] uppercase tracking-[0.18em] text-ink-mute cs-pulse">
+            Checking your session…
+          </p>
+        )}
+        {user === null && <AuthScreen onAuthed={setUser} />}
+        {user && view === "upload" && <UploadStep onRun={start} />}
+        {user && view === "running" && <RunningStep tier={tier} frac={frac} />}
+        {user && view === "results" && result && (
           <ResultsStep result={result} onRestart={() => setView("upload")} />
         )}
       </div>
