@@ -19,6 +19,7 @@ backend/data/skcm_tcga_pan_can_atlas_2018/
 backend/data/chroma/
 
 # Generated outputs
+backend/data/results/
 backend/tier1_output.json
 validation_results/
 

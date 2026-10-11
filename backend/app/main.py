@@ -5,6 +5,9 @@ Run from the backend/ folder:
     uvicorn app.main:app --reload --reload-dir app
 """
 
+import logging
+import os
+import time
 from typing import List, Literal, Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
@@ -15,16 +18,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from . import auth
+from . import auth, records
 from .db import get_db
 from .models import Researcher
 from .pipeline import run_pipeline, run_tier1
-from .tier4.copilot import answer as copilot_answer, cross_check as copilot_cross_check
+from .tier4.copilot import (
+    HISTORY_TURNS,
+    answer as copilot_answer,
+    cross_check as copilot_cross_check,
+)
 from .tier4.retriever import corpus_info
-from .upload import save_upload
+from .upload import describe_upload, save_upload, sha256_hex, upload_id_for
+
+logger = logging.getLogger("cellspark.api")
 
 app = FastAPI(
     title="CellSpark API",
@@ -60,6 +69,21 @@ async def scrub_auth_validation_errors(request: Request, exc: RequestValidationE
     return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
 
+@app.exception_handler(SQLAlchemyError)
+async def database_error(request: Request, exc: SQLAlchemyError):
+    """
+    Any database error that reaches the top becomes a plain 503.
+
+    The full exception goes to the server log only. A driver error can carry
+    the host, the SQL and its parameters; none of that belongs in a response.
+    """
+    logger.exception("Database error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "The database is unavailable. Try again shortly."},
+    )
+
+
 # ------------------------------------------------------------ schemas
 class PipelineRequest(BaseModel):
     """
@@ -80,7 +104,10 @@ class PipelineRequest(BaseModel):
     )
     upload_id: Optional[str] = Field(
         default=None,
-        description="ID returned by /api/upload. Omit to use the demo dataset.",
+        description=(
+            "upload_id returned by /api/upload (the mutation_file id). Omit "
+            "to use the demo dataset."
+        ),
     )
     sample_barcode: Optional[str] = Field(
         default=None,
@@ -88,23 +115,21 @@ class PipelineRequest(BaseModel):
     )
 
 
+# The copilot and cross-check requests name a run by id; the server loads
+# that run's stored result and, for the copilot, its stored conversation.
+# Clients that still send "result" or "history" are not rejected: unknown
+# fields are ignored, so neither can influence the answer.
+
 class CopilotRequest(BaseModel):
-    question: str = Field(..., description="Clinician's question about the run")
-    result: dict = Field(..., description="The pipeline result being asked about")
-    history: Optional[list] = Field(
-        default=None,
-        description=(
-            "Recent conversation turns, oldest first. Optional — the copilot "
-            "answers a single question fine without it. Only the last few "
-            "turns are used."
-        ),
-    )
+    run_id: int = Field(..., description="The run being asked about")
+    question: str = Field(..., min_length=1, max_length=4000,
+                          description="Clinician's question about the run")
 
 
 class CrossCheckRequest(BaseModel):
-    gene: str = Field(..., description="Gene symbol, e.g. KRAS")
-    change: str = Field(default="", description="Protein change, e.g. p.G12D")
-    result: dict = Field(default_factory=dict, description="The pipeline result in view")
+    run_id: int = Field(..., description="The run the target came from")
+    gene: str = Field(..., max_length=30, description="Gene symbol, e.g. KRAS")
+    change: str = Field(default="", max_length=30, description="Protein change, e.g. p.G12D")
 
 
 class SignupRequest(BaseModel):
@@ -130,56 +155,222 @@ def health():
     return {"status": "ok", "service": "cellspark", "version": "0.4.0"}
 
 
+# Everything below requires a signed-in researcher, and everything that names
+# a file or run by id is scoped to that researcher: someone else's id is a
+# 404, the same as an id that does not exist. A 403 would confirm it does.
+
+NOT_FOUND_RUN = "Run not found."
+NOT_FOUND_UPLOAD = "Upload not found."
+
+
+def _owned_run(db: Session, researcher: Researcher, run_id: int):
+    run = records.get_owned_run(db, researcher.researcher_id, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=NOT_FOUND_RUN)
+    return run
+
+
+def _stored_result(run):
+    """The result the copilot reads: the server's copy, never the client's."""
+    result = records.load_result(run) if run.status == "completed" else None
+    if result is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This run has no stored result to ask about. Run the analysis again.",
+        )
+    return result
+
+
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    file: UploadFile = File(...),
+    researcher: Researcher = Depends(auth.require_researcher),
+    db: Session = Depends(get_db),
+):
     """
     Accept a mutation file and report what was found in it.
 
     Validates immediately so a malformed file fails here with a clear message
     rather than thirty seconds into a pipeline run.
+
+    Deduplicated per researcher by SHA-256: uploading the same file again
+    returns the existing mutation_file row ("reused": true) instead of
+    creating a second one.
     """
+    rid = researcher.researcher_id
+    content = await file.read()
+    digest = sha256_hex(content)
+
     try:
-        content = await file.read()
-        return save_upload(file.filename, content)
+        existing = records.find_file(db, rid, digest)
+        if existing:
+            if os.path.exists(existing.stored_path):
+                info = describe_upload(existing.stored_path, existing.original_name, len(content))
+            else:
+                # Same bytes as before, but the temp directory has since been
+                # cleared. Put them back where the row says they are.
+                info = save_upload(existing.original_name, content, dest_path=existing.stored_path)
+            row, created = existing, False
+        else:
+            info = save_upload(file.filename, content)
+            try:
+                row, created = records.add_file(
+                    db, rid,
+                    original_name=info["filename"],
+                    stored_path=info["stored_path"],
+                    sha256=digest,
+                    size_bytes=len(content),
+                    mutation_count=info["missense_mutations"],
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                os.remove(info["stored_path"])
+                raise
+            if not created:
+                # Lost a race with an identical upload; keep the winner's copy.
+                os.remove(info["stored_path"])
     except ValueError as e:
         # user-fixable problem — 400, with the reason
         raise HTTPException(status_code=400, detail=str(e))
+    except SQLAlchemyError:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
 
+    info.pop("stored_path", None)       # server paths stay on the server
+    info.pop("sha256", None)
+    info.update(upload_id=str(row.file_id), file_id=row.file_id, reused=not created)
+    return info
+
 
 @app.post("/api/pipeline/run")
-def pipeline_run(req: PipelineRequest):
+def pipeline_run(
+    req: PipelineRequest,
+    researcher: Researcher = Depends(auth.require_researcher),
+    db: Session = Depends(get_db),
+):
     """
     Run the full pipeline against either an uploaded file or the demo dataset.
+
+    Recorded in two commits, deliberately:
+      1. pipeline_run ('running') and its run_allele rows, committed before
+         the pipeline starts, so a crash still leaves a record.
+      2. The completion update and every predicted_target row, committed
+         together, so a run is never left with half its targets.
+
+    The result JSON is written to disk before step 2. If step 2 fails the
+    researcher still gets the result; the run is marked failed with an
+    explanation, and the error is logged.
 
     Tier 4 answers on demand through /api/copilot/ask rather than as part of
     the run.
     """
+    rid = researcher.researcher_id
+
+    # run_allele's primary key is (run_id, allele): repeats would collide
+    alleles = list(dict.fromkeys(a.strip() for a in req.alleles if a and a.strip()))
+    if not alleles:
+        alleles = ["HLA-A*02:01"]
+    if any(len(a) > 20 for a in alleles):
+        raise HTTPException(status_code=422, detail="Allele names are at most 20 characters.")
+
+    if req.upload_id:
+        try:
+            file_id = int(req.upload_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail=NOT_FOUND_UPLOAD)
+        mfile = records.get_owned_file(db, rid, file_id)
+        if mfile is None:
+            raise HTTPException(status_code=404, detail=NOT_FOUND_UPLOAD)
+        if not os.path.exists(mfile.stored_path):
+            raise HTTPException(
+                status_code=404,
+                detail="The uploaded file has expired from temporary storage. Upload it again.",
+            )
+        disk_upload_id = upload_id_for(mfile.stored_path)
+    else:
+        mfile = records.demo_file(db, rid)
+        disk_upload_id = None
+
+    run = records.start_run(db, rid, mfile.file_id, req.algorithm, alleles)
+    db.commit()
+    run_id = run.run_id
+
+    t0 = time.monotonic()
+    elapsed = lambda: int((time.monotonic() - t0) * 1000)
+
     try:
-        return run_pipeline(
-            alleles=req.alleles,
+        result = run_pipeline(
+            alleles=alleles,
             file_name=req.file_name,
             algorithm=req.algorithm,
-            upload_id=req.upload_id,
+            upload_id=disk_upload_id,
             sample_barcode=req.sample_barcode,
         )
     except FileNotFoundError as e:
+        records.fail_run(db, run_id, f"FileNotFoundError: {e}", elapsed())
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        records.fail_run(db, run_id, f"{type(e).__name__}: {e}", elapsed())
         raise HTTPException(status_code=500, detail=f"Pipeline failed: {e}")
+
+    duration_ms = elapsed()
+    result["run_id"] = run_id
+
+    # Disk first: once the file exists, nothing below can lose the result.
+    try:
+        path = records.write_result(run_id, result)
+    except OSError as e:
+        logger.exception("Run %s completed but its result file could not be written", run_id)
+        records.fail_run(db, run_id, f"Completed, but the result file could not be written: {e}",
+                         duration_ms)
+        return result
+
+    try:
+        records.complete_run(db, run, result, path, duration_ms)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Run %s completed but recording it failed", run_id)
+        records.fail_run(
+            db, run_id,
+            "The pipeline completed but its results could not be recorded. "
+            "The full result was saved to result_path.",
+            duration_ms, result_path=path,
+        )
+    return result
+
+
+@app.get("/api/runs/{run_id}")
+def get_run(
+    run_id: int,
+    researcher: Researcher = Depends(auth.require_researcher),
+    db: Session = Depends(get_db),
+):
+    """One of the caller's runs: its stored record and, if any, its result."""
+    run = _owned_run(db, researcher, run_id)
+    return {**records.run_summary(run), "result": records.load_result(run)}
 
 
 @app.get("/api/tier1/run")
-def tier1_run(algorithm: str = "kmp", max_mutations: int = 30):
-    """Tier 1 on its own — handy for testing without the frontend."""
+def tier1_run(
+    algorithm: str = "kmp",
+    max_mutations: int = 30,
+    researcher: Researcher = Depends(auth.require_researcher),
+):
+    """Tier 1 on its own — handy for testing without the frontend. Not recorded."""
     if algorithm not in ("kmp", "boyer_moore", "naive"):
         raise HTTPException(status_code=400, detail=f"Unknown algorithm: {algorithm}")
     return run_tier1(algorithm=algorithm, max_mutations=max_mutations)
 
 
 @app.post("/api/copilot/cross-check")
-def copilot_cross_check_route(req: CrossCheckRequest):
+def copilot_cross_check_route(
+    req: CrossCheckRequest,
+    researcher: Researcher = Depends(auth.require_researcher),
+    db: Session = Depends(get_db),
+):
     """
     Report what the indexed corpus says about one gene and alteration.
 
@@ -187,40 +378,74 @@ def copilot_cross_check_route(req: CrossCheckRequest):
     gene missing from it is a gap in the index, not a finding about the gene,
     and the response's "caveat" field says so in every state — the frontend
     shows it unconditionally.
+
+    Every lookup is recorded in cross_check_lookup, not_covered included.
     """
+    run = _owned_run(db, researcher, req.run_id)
+    result = _stored_result(run)
     try:
-        return copilot_cross_check(req.gene, req.change, req.result)
+        response = copilot_cross_check(req.gene, req.change, result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Cross-check failed: {e}")
 
+    try:
+        records.record_cross_check(db, run, researcher.researcher_id, req.gene, req.change, response)
+        db.commit()
+    except Exception:
+        # The lookup itself succeeded; losing its log row is not worth failing it.
+        db.rollback()
+        logger.exception("Could not record cross-check for run %s", run.run_id)
+    return response
+
 
 @app.get("/api/corpus/info")
-def corpus_status():
+def corpus_status(researcher: Researcher = Depends(auth.require_researcher)):
     """What literature is indexed, so the UI can report it."""
     return corpus_info()
 
 
 @app.post("/api/copilot/ask")
-def copilot_ask(req: CopilotRequest):
+def copilot_ask(
+    req: CopilotRequest,
+    researcher: Researcher = Depends(auth.require_researcher),
+    db: Session = Depends(get_db),
+):
     """
     Answer a question about a pipeline run.
 
     Grounded in two sources: the run's own numbers, and retrieved PubMed
     abstracts. Every response carries its citations.
 
+    The run's result and the conversation so far are both loaded from the
+    server's own records, not taken from the request: a client-supplied
+    history could contain answers the copilot never gave.
+
     The response's "provider" field reports which path produced the answer —
     the configured model, or the template fallback when generation is
-    unavailable.
+    unavailable. The same value is stored on the assistant message.
     """
+    run = _owned_run(db, researcher, req.run_id)
+    result = _stored_result(run)
+    history = records.load_history(db, run.run_id, limit=HISTORY_TURNS * 2)
+
     try:
-        return copilot_answer(req.question, req.result, history=req.history)
+        response = copilot_answer(req.question, result, history=history)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Copilot failed: {e}")
 
+    try:
+        records.record_chat(db, run, researcher.researcher_id, req.question, response)
+        db.commit()
+    except Exception:
+        # The answer is still good; it just won't be in the stored history.
+        db.rollback()
+        logger.exception("Could not record copilot exchange for run %s", run.run_id)
+    return response
+
 
 # ------------------------------------------------------------ auth
-# Phase 1: accounts only. The pipeline and copilot routes above stay open;
-# phase 2 attaches runs, uploads and chats to the signed-in researcher.
+# Signup and login are the only routes besides / and /api/health that work
+# without a session.
 
 INVALID_LOGIN = "Invalid email or password"
 

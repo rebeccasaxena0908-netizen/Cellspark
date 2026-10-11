@@ -9,6 +9,7 @@ import BackendStatus from "./components/BackendStatus";
 import LogoMark from "./components/LogoMark";
 import { runPipelineReal } from "./lib/mockApi";
 import { logout, me } from "./lib/auth";
+import { SESSION_EXPIRED_EVENT } from "./lib/api";
 
 function TopBar({ onHome, stage, user, onSignOut }) {
   return (
@@ -53,6 +54,8 @@ export default function App() {
   const [result, setResult] = useState(null);
   // undefined = still asking the server, null = signed out, object = signed in
   const [user, setUser] = useState(undefined);
+  // Set when the server rejected the session mid-use, so sign-in can say why.
+  const [expired, setExpired] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -64,6 +67,25 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
+  // Any 401 from the API means the session is gone (expired, or signed out
+  // elsewhere). Clear everything the previous session could see and return
+  // to sign-in; after signing in again the researcher starts from upload.
+  useEffect(() => {
+    function onExpired() {
+      setResult(null);
+      setUser(null);
+      setExpired(true);
+      setView((v) => (v === "hero" ? v : "upload"));
+    }
+    window.addEventListener(SESSION_EXPIRED_EVENT, onExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired);
+  }, []);
+
+  function signedIn(u) {
+    setExpired(false);
+    setUser(u);
+  }
+
   async function signOut() {
     try {
       await logout();
@@ -72,6 +94,7 @@ export default function App() {
     }
     // Drop the previous researcher's result so the next one can't see it.
     setResult(null);
+    setExpired(false);
     setUser(null);
     setView("hero");
   }
@@ -115,7 +138,12 @@ export default function App() {
             Checking your session…
           </p>
         )}
-        {user === null && <AuthScreen onAuthed={setUser} />}
+        {user === null && (
+          <AuthScreen
+            onAuthed={signedIn}
+            notice={expired ? "Your session has expired. Sign in again to continue." : null}
+          />
+        )}
         {user && view === "upload" && <UploadStep onRun={start} />}
         {user && view === "running" && <RunningStep tier={tier} frac={frac} />}
         {user && view === "results" && result && (

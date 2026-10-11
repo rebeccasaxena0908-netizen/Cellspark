@@ -62,7 +62,7 @@ function Field({ id, label, hint, error, optional, ...input }) {
   );
 }
 
-export default function AuthScreen({ onAuthed }) {
+export default function AuthScreen({ onAuthed, notice = null }) {
   const uid = useId();
   const [mode, setMode] = useState("login");          // login | signup
   const [form, setForm] = useState({
@@ -150,6 +150,12 @@ export default function AuthScreen({ onAuthed }) {
           {tab("login", "Sign in")}
           {tab("signup", "Create account")}
         </div>
+
+        {notice && !serverError && (
+          <p role="status" className="mt-5 rounded-lg border border-warn/40 bg-warn/8 p-4 text-sm text-warn">
+            {notice}
+          </p>
+        )}
 
         {serverError && (
           <div role="alert" className="mt-5 rounded-lg border border-alert/40 bg-alert/8 p-4">

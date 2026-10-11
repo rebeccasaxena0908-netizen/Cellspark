@@ -8,14 +8,44 @@
 
 const BASE = "/api";
 
+/**
+ * Fired on any 401 from a route that needs a session. App.jsx listens and
+ * drops back to the sign-in screen, so an expired session shows up as
+ * "sign in again" rather than as a page that quietly stops working.
+ */
+export const SESSION_EXPIRED_EVENT = "cellspark:session-expired";
+
+/** Error carrying the HTTP status, so callers can tell 401 from other failures. */
+export class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/**
+ * fetch with the session cookie attached, and 401 reported globally.
+ *
+ * credentials: "include" sends the httpOnly session cookie. Every route here
+ * except /health needs it.
+ */
+async function send(path, options = {}) {
+  const res = await fetch(`${BASE}${path}`, { credentials: "include", ...options });
+  if (res.status === 401) {
+    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+    throw new ApiError("Your session has expired. Sign in again.", 401);
+  }
+  return res;
+}
+
 async function request(path, options = {}) {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await send(path, {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`${res.status} ${res.statusText} — ${body.slice(0, 200)}`);
+    throw new ApiError(`${res.status} ${res.statusText} — ${body.slice(0, 200)}`, res.status);
   }
   return res.json();
 }
@@ -41,17 +71,21 @@ export function runPipelineApi({ alleles, fileName, algorithm = "kmp", uploadId 
   });
 }
 
+/**
+ * The copilot and cross-check name the run by id. The server loads that
+ * run's stored result and conversation itself, so neither is sent from here.
+ */
 export function askCopilotApi(question, result) {
   return request("/copilot/ask", {
     method: "POST",
-    body: JSON.stringify({ question, result }),
+    body: JSON.stringify({ question, run_id: result?.run_id }),
   });
 }
 
 export function crossCheckApi(gene, change, result) {
   return request("/copilot/cross-check", {
     method: "POST",
-    body: JSON.stringify({ gene, change, result }),
+    body: JSON.stringify({ gene, change, run_id: result?.run_id }),
   });
 }
 
@@ -65,7 +99,7 @@ export async function uploadFile(file) {
 
   // No Content-Type header — the browser must set it with the multipart
   // boundary itself. Setting it manually breaks the upload.
-  const res = await fetch(`${BASE}/upload`, { method: "POST", body: form });
+  const res = await send("/upload", { method: "POST", body: form });
 
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
@@ -75,7 +109,7 @@ export async function uploadFile(file) {
     } catch {
       /* non-JSON error body */
     }
-    throw new Error(detail);
+    throw new ApiError(detail, res.status);
   }
   return res.json();
 }

@@ -189,7 +189,10 @@ export async function askCopilot(question, result) {
       passages: r.passages ?? [],
       provider: r.provider ?? "templates",
     };
-  } catch {
+  } catch (err) {
+    // An expired session is not "backend unreachable": let it through so the
+    // app returns to sign-in instead of answering with simulated text.
+    if (err.status === 401) throw err;
     return askCopilotMock(question, result);
   }
 }
@@ -205,7 +208,8 @@ export async function askCopilot(question, result) {
 export async function crossCheck(gene, change, result) {
   try {
     return await crossCheckApi(gene, change, result?.apiRaw ?? {});
-  } catch {
+  } catch (err) {
+    if (err.status === 401) throw err;
     return {
       gene,
       change,
