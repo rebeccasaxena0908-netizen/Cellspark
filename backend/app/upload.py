@@ -13,16 +13,30 @@ present, then report what we found so the user can see their file was
 understood before committing to a run.
 """
 
+import glob
 import hashlib
 import os
+import re
 import tempfile
 import uuid
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from .tier1.maf_parser import load_maf
 
-UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "cellspark_uploads")
+# Permanent, per researcher: data/uploads/<researcher_id>/<upload_id>_<name>.
+# Not the system temp folder — macOS clears that, and run history must not
+# outlive the files it was computed from by accident. Gitignored: patient
+# mutation files are never committed.
+UPLOAD_DIR = os.environ.get("CELLSPARK_UPLOAD_DIR") or os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "data", "uploads")
+)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Where uploads lived before Phase 3. Still searched, so a file that hasn't
+# been moved by scripts/migrate_upload_storage.py yet is found, not lost.
+LEGACY_UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "cellspark_uploads")
+
+_UPLOAD_ID = re.compile(r"[0-9a-f]{12}")
 
 MAX_BYTES = 50 * 1024 * 1024   # 50 MB — a single-cohort MAF is well under this
 
@@ -66,14 +80,16 @@ def describe_upload(path: str, filename: str, size_bytes: int) -> Dict[str, Any]
     }
 
 
-def save_upload(filename: str, content: bytes, dest_path: str = None) -> Dict[str, Any]:
+def save_upload(filename: str, content: bytes, dest_path: str = None,
+                owner: Optional[int] = None) -> Dict[str, Any]:
     """
     Persist an uploaded file and report what was found in it.
 
     Returns an upload_id the pipeline uses to find the file again, plus the
     stored path and SHA-256 for the mutation_file row. dest_path rewrites a
     known location instead of minting a new one; the upload route uses it
-    when a deduplicated file has since been cleared out of the temp directory.
+    when a deduplicated file has since gone missing from disk. owner (the
+    researcher id) picks the per-researcher subdirectory for a new file.
     """
     if len(content) > MAX_BYTES:
         raise ValueError(
@@ -87,7 +103,8 @@ def save_upload(filename: str, content: bytes, dest_path: str = None) -> Dict[st
     safe_name = os.path.basename(filename or "") or "upload.maf"
     if dest_path is None:
         upload_id = uuid.uuid4().hex[:12]
-        path = os.path.join(UPLOAD_DIR, f"{upload_id}_{safe_name}")
+        folder = os.path.join(UPLOAD_DIR, str(owner)) if owner is not None else UPLOAD_DIR
+        path = os.path.join(folder, f"{upload_id}_{safe_name}")
     else:
         path = dest_path
         upload_id = upload_id_for(dest_path)
@@ -117,8 +134,20 @@ def upload_id_for(stored_path: str) -> str:
 
 
 def get_upload_path(upload_id: str) -> str:
-    """Resolve an upload ID back to a file path."""
-    for name in os.listdir(UPLOAD_DIR):
-        if name.startswith(f"{upload_id}_"):
-            return os.path.join(UPLOAD_DIR, name)
-    raise FileNotFoundError(f"Upload {upload_id} not found — it may have expired.")
+    """
+    Resolve an upload ID back to a file path.
+
+    Looks in the researcher subdirectories, then the top level, then the
+    pre-Phase-3 temp location. The id is checked against its known shape
+    first, since it becomes part of a glob pattern.
+    """
+    if upload_id and _UPLOAD_ID.fullmatch(upload_id):
+        for pattern in (
+            os.path.join(UPLOAD_DIR, "*", f"{upload_id}_*"),
+            os.path.join(UPLOAD_DIR, f"{upload_id}_*"),
+            os.path.join(LEGACY_UPLOAD_DIR, f"{upload_id}_*"),
+        ):
+            hits = sorted(glob.glob(pattern))
+            if hits:
+                return hits[0]
+    raise FileNotFoundError(f"Upload {upload_id} not found — it may have been removed.")

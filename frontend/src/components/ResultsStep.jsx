@@ -12,15 +12,33 @@ function Stat({ label, value }) {
   );
 }
 
-export default function ResultsStep({ result, onRestart }) {
-  const { stats, targets, mrna, benchmark } = result;
+/** "11 Oct 2026, 21:56" in the viewer's locale. */
+function formatRunDate(iso) {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+export default function ResultsStep({ result, onRestart, onBack }) {
+  const { stats, targets, mrna, benchmark, reopened } = result;
   const top = targets[0];
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-12 cs-fade-up">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <Eyebrow>Step 3 of 3 · complete</Eyebrow>
+          {reopened ? (
+            // History, not a run that just happened.
+            <p className="flex flex-wrap items-center gap-2">
+              <Badge tone="info">Saved run</Badge>
+              <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-ink-mute">
+                Ran {formatRunDate(reopened.startedAt)}
+              </span>
+            </p>
+          ) : (
+            <Eyebrow>Step 3 of 3 · complete</Eyebrow>
+          )}
           <h2 className="mt-3 font-display text-3xl font-semibold">Results</h2>
           <p className="mt-2 text-ink-dim">
             <span className="font-mono text-ink">{result.fileName}</span> ·{" "}
@@ -30,11 +48,20 @@ export default function ResultsStep({ result, onRestart }) {
             )}
           </p>
         </div>
-        <Button variant="ghost" onClick={onRestart}>New analysis</Button>
+        <div className="flex flex-wrap gap-3">
+          {onBack && <Button variant="ghost" onClick={onBack}>Back to history</Button>}
+          <Button variant="ghost" onClick={onRestart}>New analysis</Button>
+        </div>
       </div>
 
+      {result.unavailableNote && (
+        <p role="note" className="mt-6 rounded-lg border border-warn/40 bg-warn/8 p-4 text-sm text-ink-dim">
+          {result.unavailableNote}
+        </p>
+      )}
+
       {/* the single answer, before any detail */}
-      <Panel className="mt-8 p-5">
+      {top && <Panel className="mt-8 p-5">
         <p className="text-[11px] uppercase tracking-wider text-ink-mute">
           Leading candidate
         </p>
@@ -45,7 +72,7 @@ export default function ResultsStep({ result, onRestart }) {
           <span className="text-ink">{top.allele}</span> at{" "}
           <span className="text-ink">{top.ic50} nM</span>
         </p>
-      </Panel>
+      </Panel>}
 
       {/* the funnel: three billion characters down to ten targets */}
       <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-5">
@@ -68,7 +95,7 @@ export default function ResultsStep({ result, onRestart }) {
             the whole page scrolls sideways on a phone. */}
         <div className="min-w-0 space-y-6 lg:col-span-2">
           <TargetsTable targets={targets} result={result} />
-          <MrnaPanel mrna={mrna} />
+          {mrna && <MrnaPanel mrna={mrna} />}
 
           <Panel className="p-5">
             <h3 className="font-display text-lg font-semibold">Search performance</h3>

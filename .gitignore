@@ -20,6 +20,8 @@ backend/data/chroma/
 
 # Generated outputs
 backend/data/results/
+# Uploaded patient mutation files. Never commit these.
+backend/data/uploads/
 backend/tier1_output.json
 validation_results/
 

@@ -113,3 +113,26 @@ export async function uploadFile(file) {
   }
   return res.json();
 }
+
+// ------------------------------------------------------------- history
+
+export function listRuns({ limit = 20, offset = 0 } = {}) {
+  return request(`/runs?limit=${limit}&offset=${offset}`);
+}
+
+/** A stored run. result is null (result_available false) if its file is gone. */
+export function getRun(runId) {
+  return request(`/runs/${encodeURIComponent(runId)}`);
+}
+
+export function getRunMessages(runId) {
+  return request(`/runs/${encodeURIComponent(runId)}/messages`);
+}
+
+export function deleteRun(runId) {
+  return request(`/runs/${encodeURIComponent(runId)}`, { method: "DELETE" });
+}
+
+export function getMyStats() {
+  return request("/me/stats");
+}

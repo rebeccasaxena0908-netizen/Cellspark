@@ -5,7 +5,13 @@
  * versions remain as fallbacks so the UI never dead-ends when the backend is
  * unreachable, and the mock generator still supplies the benchmark table.
  */
-import { runPipelineApi, askCopilotApi, crossCheckApi } from "./api";
+import {
+  runPipelineApi,
+  askCopilotApi,
+  crossCheckApi,
+  getRun,
+  getRunMessages,
+} from "./api";
 
 const GENES = ["TP53", "KRAS", "BRAF", "PIK3CA", "PTEN", "EGFR", "NRAS", "APC", "IDH1", "CTNNB1"];
 const AA = "ACDEFGHIKLMNPQRSTVWY".split("");
@@ -48,6 +54,42 @@ function makeMrna(len = 372) {
 }
 
 /**
+ * The simulated result body, built synchronously. runPipelineMock resolves
+ * with it once its animation ends; reopening a stored run uses it directly
+ * for the parts the backend doesn't produce (the benchmark table).
+ */
+function mockBody({ alleles = [], fileName = "sample.maf" }) {
+  const seq = makeMrna();
+  const u = (seq.match(/U/g) || []).length / seq.length;
+  return {
+    fileName,
+    alleles: alleles.length ? alleles : ["HLA-A*02:01"],
+    stats: {
+      variantsRead: 4200 + rand(2600),
+      missense: 780 + rand(420),
+      candidates: 1900 + rand(900),
+      selfRejected: 90 + rand(140),
+      screened: 1500 + rand(700),
+    },
+    targets: makeTargets(alleles),
+    mrna: {
+      sequence: seq,
+      length: seq.length,
+      cai: +(0.78 + Math.random() * 0.16).toFixed(3),
+      caiBefore: +(0.42 + Math.random() * 0.14).toFixed(3),
+      uracil: +(u * 100).toFixed(1),
+      uracilBefore: +(u * 100 + 6 + Math.random() * 5).toFixed(1),
+      gc: +(52 + Math.random() * 8).toFixed(1),
+    },
+    benchmark: [
+      { algo: "Boyer–Moore", ms: 14.09, note: "fastest of the two implemented" },
+      { algo: "Knuth–Morris–Pratt", ms: 23.14, note: "worst-case guarantee" },
+      { algo: "Naive baseline", ms: 26.70, note: "control" },
+    ],
+  };
+}
+
+/**
  * Simulated pipeline. Reports progress through onProgress(tierIndex, fraction)
  * and resolves with a full result object.
  */
@@ -68,34 +110,7 @@ export function runPipelineMock({ alleles = [], fileName = "sample.maf" }, onPro
       if (frac >= 1) {
         tier++;
         if (tier >= durations.length) {
-          const seq = makeMrna();
-          const u = (seq.match(/U/g) || []).length / seq.length;
-          resolve({
-            fileName,
-            alleles: alleles.length ? alleles : ["HLA-A*02:01"],
-            stats: {
-              variantsRead: 4200 + rand(2600),
-              missense: 780 + rand(420),
-              candidates: 1900 + rand(900),
-              selfRejected: 90 + rand(140),
-              screened: 1500 + rand(700),
-            },
-            targets: makeTargets(alleles),
-            mrna: {
-              sequence: seq,
-              length: seq.length,
-              cai: +(0.78 + Math.random() * 0.16).toFixed(3),
-              caiBefore: +(0.42 + Math.random() * 0.14).toFixed(3),
-              uracil: +(u * 100).toFixed(1),
-              uracilBefore: +(u * 100 + 6 + Math.random() * 5).toFixed(1),
-              gc: +(52 + Math.random() * 8).toFixed(1),
-            },
-            benchmark: [
-              { algo: "Boyer–Moore", ms: 14.09, note: "fastest of the two implemented" },
-              { algo: "Knuth–Morris–Pratt", ms: 23.14, note: "worst-case guarantee" },
-              { algo: "Naive baseline", ms: 26.70, note: "control" },
-            ],
-          });
+          resolve(mockBody({ alleles, fileName }));
           return;
         }
       }
@@ -284,8 +299,21 @@ export async function runPipelineReal(
   }
 
   // Mock generator still supplies the benchmark table
-  const filler = await runPipelineMock({ alleles, fileName }, () => {});
+  // Built directly, not via runPipelineMock: that one animates through its
+  // simulated tier durations (~8 s) before resolving, which held the real
+  // results back long after the backend had answered.
+  const filler = mockBody({ alleles, fileName });
 
+  return shapeResult(api, fileName, filler);
+}
+
+/**
+ * Backend response -> the object ResultsStep renders.
+ *
+ * Shared by a fresh run and a reopened one, so a past run re-renders through
+ * exactly the same code as when it first appeared.
+ */
+function shapeResult(api, fileName, filler) {
   const t1 = api.tier1;
   const t2 = api.tier2 || {};
   const t3 = api.tier3 || {};
@@ -338,5 +366,98 @@ export async function runPipelineReal(
           notes: t3.notes,
         }
       : filler.mrna,
+  };
+}
+
+/** Index of the first residue that differs from wild type, or -1. */
+function mutationOffset(peptide = "", wildtype = "") {
+  if (!wildtype) return -1;
+  for (let i = 0; i < peptide.length; i++) {
+    if (peptide[i] !== wildtype[i]) return i;
+  }
+  return -1;
+}
+
+/** A stored copilot message -> the shape Copilot renders. */
+function toChatMessage(m) {
+  if (m.role === "user") return { role: "user", text: m.content };
+  return {
+    role: "assistant",
+    text: m.content,
+    sources: [],
+    provider: m.provider || "templates",
+    passages: (m.citations || []).map((c) => ({
+      pmid: c.pmid,
+      title: c.title || "",
+      journal: c.journal || "",
+      year: c.year != null ? String(c.year) : "",
+      snippet: c.snippet || "",
+      score: c.similarity ?? 0,
+    })),
+  };
+}
+
+/**
+ * Reopen a past run from the server.
+ *
+ * With the stored result file present, this is the exact response the run
+ * first returned, shaped by the same shapeResult as a fresh run. Without it,
+ * only the database rows remain: ranked targets and headline figures. That
+ * case is rendered as-is, with nothing simulated standing in for what's lost
+ * — no mRNA panel, and a copilot that shows its history but can't answer,
+ * since answers are grounded in the full result.
+ */
+export async function openStoredRun(runId) {
+  const [run, chat] = await Promise.all([getRun(runId), getRunMessages(runId)]);
+  const history = (chat.messages || []).map(toChatMessage);
+  const reopened = { runId: run.run_id, startedAt: run.started_at };
+
+  if (run.result_available) {
+    const api = run.result;
+    const shaped = shapeResult(
+      api,
+      api.file_name || run.file_name,
+      mockBody({ alleles: api.alleles || run.alleles, fileName: api.file_name })
+    );
+    return { ...shaped, reopened, history };
+  }
+
+  const dash = (v) => (v == null ? "—" : v);
+  return {
+    fileName: run.file_name,
+    alleles: run.alleles,
+    algorithm: run.algorithm,
+    source: null,
+    warning: null,
+    apiRaw: { run_id: run.run_id },
+    real: null,
+    stats: {
+      variantsRead: dash(run.mutations_parsed),
+      missense: dash(run.mutations_parsed),
+      candidates: dash(run.candidates_built),
+      selfRejected: "—",
+      screened: "—",
+    },
+    targets: run.targets.map((t) => ({
+      rank: t.rank_position,
+      peptide: t.peptide,
+      wildtype: t.wildtype,
+      gene: t.gene_symbol,
+      change: t.protein_change,
+      allele: t.allele,
+      ic50: t.ic50_nm,
+      wtIc50: t.wt_ic50_nm,
+      agretopicity: t.agretopicity,
+      mutPos: mutationOffset(t.peptide, t.wildtype),
+    })),
+    mrna: null,
+    benchmark: mockBody({ alleles: run.alleles }).benchmark,
+    unavailableNote:
+      "The full result file for this run is no longer on the server. Shown " +
+      "here are the ranked targets and figures stored in the database; the " +
+      "mRNA design and the copilot need the full result.",
+    copilotUnavailable: true,
+    reopened,
+    history,
   };
 }

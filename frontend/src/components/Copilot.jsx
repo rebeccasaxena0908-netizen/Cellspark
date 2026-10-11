@@ -3,6 +3,11 @@ import { askCopilot } from "../lib/mockApi";
 import { Panel } from "./ui";
 import { Evidence } from "./Passages";
 
+// Same keyboard focus treatment as the rest of the app.
+const focusRing =
+  "focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-core/70 " +
+  "focus-visible:ring-offset-2 focus-visible:ring-offset-void";
+
 const SUGGESTIONS = [
   "What does IC50 mean here?",
   "Explain the codon changes",
@@ -11,14 +16,21 @@ const SUGGESTIONS = [
 ];
 
 export default function Copilot({ result }) {
-  const [messages, setMessages] = useState([
+  // A reopened run arrives with its stored conversation in result.history,
+  // which continues from where it left off: the server appends new questions
+  // to the same run.
+  const [messages, setMessages] = useState(() => [
     {
       role: "assistant",
       text:
         "I can walk you through anything in these results — what the scores mean, why a target was kept, or what changed in the sequence. Ask in plain language.",
       sources: [],
     },
+    ...(result.history ?? []),
   ]);
+  // Answers are grounded in the full stored result; without it, the history
+  // can be read but not continued.
+  const readOnly = Boolean(result.copilotUnavailable);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const endRef = useRef(null);
@@ -29,22 +41,27 @@ export default function Copilot({ result }) {
 
   async function send(text) {
     const q = (text ?? input).trim();
-    if (!q || busy) return;
+    if (!q || busy || readOnly) return;
     setInput("");
     setMessages((m) => [...m, { role: "user", text: q }]);
     setBusy(true);
-    const res = await askCopilot(q, result);
-    setMessages((m) => [
-      ...m,
-      {
-        role: "assistant",
-        text: res.answer,
-        sources: res.sources,
-        passages: res.passages,
-        provider: res.provider,
-      },
-    ]);
-    setBusy(false);
+    try {
+      const res = await askCopilot(q, result);
+      setMessages((m) => [
+        ...m,
+        {
+          role: "assistant",
+          text: res.answer,
+          sources: res.sources,
+          passages: res.passages,
+          provider: res.provider,
+        },
+      ]);
+    } catch {
+      // Only a 401 reaches here, and the app is already returning to sign-in.
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -100,13 +117,19 @@ export default function Copilot({ result }) {
       </div>
 
       <div className="border-t border-line px-5 py-4">
+        {readOnly && (
+          <p className="mb-3 text-xs text-ink-mute">
+            This run's full result is no longer stored, so new questions can't be
+            answered. The conversation above is kept as it was.
+          </p>
+        )}
         <div className="mb-3 flex flex-wrap gap-2">
           {SUGGESTIONS.map((s) => (
             <button
               key={s}
               onClick={() => send(s)}
-              disabled={busy}
-              className="rounded-full border border-line px-3 py-1.5 text-xs text-ink-dim transition hover:border-cyan-core/55 hover:text-ink disabled:opacity-40"
+              disabled={busy || readOnly}
+              className={`rounded-full border border-line px-3 py-1.5 text-xs text-ink-dim transition hover:border-cyan-core/55 hover:text-ink disabled:opacity-40 ${focusRing}`}
             >
               {s}
             </button>
@@ -119,13 +142,14 @@ export default function Copilot({ result }) {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && send()}
             placeholder="Type a question"
+            disabled={readOnly}
             aria-label="Ask a question about these results"
             className="min-w-0 flex-1 rounded-lg border border-line bg-void px-4 py-3 text-sm text-ink placeholder:text-ink-mute focus:border-cyan-core focus:outline-none"
           />
           <button
             onClick={() => send()}
-            disabled={busy || !input.trim()}
-            className="rounded-lg bg-cyan-core px-4 py-3 text-sm font-medium text-void transition hover:bg-cyan-glow disabled:opacity-35"
+            disabled={busy || readOnly || !input.trim()}
+            className={`rounded-lg bg-cyan-core px-4 py-3 text-sm font-medium text-void transition hover:bg-cyan-glow disabled:opacity-35 ${focusRing}`}
           >
             Send
           </button>

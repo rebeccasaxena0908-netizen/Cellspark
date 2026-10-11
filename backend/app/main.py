@@ -10,7 +10,7 @@ import os
 import time
 from typing import List, Literal, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -207,12 +207,12 @@ async def upload_file(
             if os.path.exists(existing.stored_path):
                 info = describe_upload(existing.stored_path, existing.original_name, len(content))
             else:
-                # Same bytes as before, but the temp directory has since been
-                # cleared. Put them back where the row says they are.
+                # Same bytes as before, but the stored copy has gone missing.
+                # Put them back where the row says they are.
                 info = save_upload(existing.original_name, content, dest_path=existing.stored_path)
             row, created = existing, False
         else:
-            info = save_upload(file.filename, content)
+            info = save_upload(file.filename, content, owner=rid)
             try:
                 row, created = records.add_file(
                     db, rid,
@@ -342,15 +342,73 @@ def pipeline_run(
     return result
 
 
+# ------------------------------------------------------------ history
+@app.get("/api/runs")
+def list_runs(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    researcher: Researcher = Depends(auth.require_researcher),
+    db: Session = Depends(get_db),
+):
+    """The caller's runs, newest first, one page at a time."""
+    return records.list_runs(db, researcher.researcher_id, limit, offset)
+
+
 @app.get("/api/runs/{run_id}")
 def get_run(
     run_id: int,
     researcher: Researcher = Depends(auth.require_researcher),
     db: Session = Depends(get_db),
 ):
-    """One of the caller's runs: its stored record and, if any, its result."""
+    """
+    One of the caller's runs: the stored record, and the full result JSON so
+    it can be re-rendered as it first appeared. If the result file is gone,
+    result is null and result_available is false; the stored targets remain.
+    """
     run = _owned_run(db, researcher, run_id)
-    return {**records.run_summary(run), "result": records.load_result(run)}
+    return records.run_detail(db, run)
+
+
+@app.get("/api/runs/{run_id}/messages")
+def get_run_messages(
+    run_id: int,
+    researcher: Researcher = Depends(auth.require_researcher),
+    db: Session = Depends(get_db),
+):
+    """The copilot conversation for a run, oldest first, with citations."""
+    run = _owned_run(db, researcher, run_id)
+    return {"run_id": run.run_id, "messages": records.list_messages(db, run.run_id)}
+
+
+@app.delete("/api/runs/{run_id}")
+def delete_run(
+    run_id: int,
+    researcher: Researcher = Depends(auth.require_researcher),
+    db: Session = Depends(get_db),
+):
+    """
+    Permanently delete a run, its targets, chat and cross-checks, and its
+    result file. The uploaded file and its row are kept: other runs may use
+    them.
+
+    The file goes only after the delete commits. A failed commit leaves the
+    run whole; a failed file removal leaves an orphan file and a log line,
+    which is the better way round.
+    """
+    run = _owned_run(db, researcher, run_id)
+    path = records.delete_run(db, run)
+    db.commit()
+    records.remove_result_file(path)
+    return {"deleted": run_id}
+
+
+@app.get("/api/me/stats")
+def my_stats(
+    researcher: Researcher = Depends(auth.require_researcher),
+    db: Session = Depends(get_db),
+):
+    """Summary figures for the history view's header."""
+    return records.my_stats(db, researcher.researcher_id)
 
 
 @app.get("/api/tier1/run")

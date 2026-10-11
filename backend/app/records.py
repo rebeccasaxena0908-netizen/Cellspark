@@ -24,7 +24,7 @@ import os
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -131,34 +131,72 @@ def add_file(db: Session, researcher_id: int, original_name: str, stored_path: s
     return row, True
 
 
-def demo_file(db: Session, researcher_id: int) -> MutationFile:
-    """
-    The bundled sample patient, registered as a file this researcher owns.
+def demo_path() -> str:
+    """Permanent home of the bundled sample patient's MAF, shared by everyone."""
+    from . import upload
+    return os.path.join(upload.UPLOAD_DIR, "demo", DEMO_FILE_NAME)
 
-    pipeline_run.file_id is NOT NULL, so a demo run needs a file row like any
-    other. The demo MAF is regenerated per process into a fresh temp directory
-    but from a fixed seed, so its SHA-256 is stable: the (researcher_id,
-    sha256) key means this inserts once per researcher and is reused after.
+
+def _ensure_demo_copy() -> Tuple[str, bytes, str]:
+    """
+    Write the demo MAF to its permanent path once, and return (path, bytes,
+    sha256).
+
+    pipeline.py still builds its demo dataset in memory per process (it needs
+    the synthetic proteome too, and that code is not touched here). The bytes
+    are identical every time because the generator is seeded, so the copy
+    written here is the same file the pipeline reads — just at a path that
+    survives a restart, which is what the mutation_file row records.
     """
     from .pipeline import _get_demo        # deferred: pipeline imports heavy ML code
-    from .tier1.maf_parser import load_maf
 
     _, (_, maf_path, _, _) = _get_demo()
     with open(maf_path, "rb") as fh:
         content = fh.read()
     digest = sha256_hex(content)
 
+    path = demo_path()
+    current = None
+    if os.path.exists(path):
+        with open(path, "rb") as fh:
+            current = sha256_hex(fh.read())
+    if current != digest:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".part"
+        with open(tmp, "wb") as fh:
+            fh.write(content)
+        os.replace(tmp, path)
+    return path, content, digest
+
+
+def demo_file(db: Session, researcher_id: int) -> MutationFile:
+    """
+    The bundled sample patient, registered as a file this researcher owns.
+
+    pipeline_run.file_id is NOT NULL, so a demo run needs a file row like any
+    other. The demo MAF's SHA-256 is stable (seeded generator), so the
+    (researcher_id, sha256) key means this inserts once per researcher and is
+    reused after. A row written before Phase 3 points into a temp folder that
+    no longer exists; it is repointed at the permanent copy here.
+    """
+    from .tier1.maf_parser import load_maf
+
+    path, content, digest = _ensure_demo_copy()
+
     existing = find_file(db, researcher_id, digest)
     if existing:
+        if existing.stored_path != path:
+            existing.stored_path = path
+            db.flush()
         return existing
 
     row, _ = add_file(
         db, researcher_id,
         original_name=DEMO_FILE_NAME,
-        stored_path=maf_path,
+        stored_path=path,
         sha256=digest,
         size_bytes=len(content),
-        mutation_count=len(load_maf(maf_path)),
+        mutation_count=len(load_maf(path)),
     )
     return row
 
@@ -326,6 +364,7 @@ def run_summary(run: PipelineRun) -> Dict[str, Any]:
         "targets": [{
             "rank_position": t.rank_position,
             "peptide": t.peptide,
+            "wildtype": t.wildtype,
             "gene_symbol": t.gene_symbol,
             "protein_change": t.protein_change,
             "allele": t.allele,
@@ -418,3 +457,231 @@ def record_cross_check(db: Session, run: PipelineRun, researcher_id: int,
         provider=_text(response.get("provider"), 50),
     ))
     db.flush()
+
+
+# ---------------------------------------------------------------- history
+# Read paths for the history dashboard. Each is a fixed number of statements
+# however many rows come back: the list is one query plus one count, the chat
+# is messages plus citations. Nothing loops over runs issuing a query each.
+
+_RUN_LIST_SQL = text("""
+    SELECT r.run_id, r.status, r.algorithm, r.started_at, r.finished_at,
+           r.duration_ms, r.targets_returned, r.best_ic50_nm, r.cai_after,
+           r.error_message,
+           f.file_id, f.original_name, f.stored_path,
+           t.gene_symbol AS top_gene, t.peptide AS top_peptide,
+           (SELECT GROUP_CONCAT(a.allele ORDER BY a.allele SEPARATOR ',')
+              FROM run_allele a
+             WHERE a.run_id = r.run_id) AS alleles
+      FROM pipeline_run r
+      JOIN mutation_file f        ON f.file_id = r.file_id
+      LEFT JOIN predicted_target t ON t.run_id = r.run_id AND t.rank_position = 1
+     WHERE r.researcher_id = :rid
+     ORDER BY r.started_at DESC, r.run_id DESC
+     LIMIT :limit OFFSET :offset
+""")
+
+
+def _iso(dt) -> Optional[str]:
+    return dt.isoformat() if dt else None
+
+
+def _num(v) -> Optional[float]:
+    return float(v) if v is not None else None
+
+
+def list_runs(db: Session, researcher_id: int, limit: int, offset: int) -> Dict[str, Any]:
+    """
+    One page of a researcher's runs, newest first.
+
+    started_at has one-second resolution, so run_id breaks ties: two runs in
+    the same second still come back in a stable, newest-first order.
+
+    run_allele has no ordering column, so alleles come back alphabetically,
+    not in the order they were requested.
+    """
+    rows = db.execute(
+        _RUN_LIST_SQL, {"rid": researcher_id, "limit": limit, "offset": offset}
+    ).mappings().all()
+    total = db.execute(
+        select(func.count()).select_from(PipelineRun)
+        .where(PipelineRun.researcher_id == researcher_id)
+    ).scalar_one()
+
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "runs": [{
+            "run_id": r["run_id"],
+            "status": r["status"],
+            "algorithm": r["algorithm"],
+            "started_at": _iso(r["started_at"]),
+            "finished_at": _iso(r["finished_at"]),
+            "duration_ms": r["duration_ms"],
+            "targets_returned": r["targets_returned"],
+            "best_ic50_nm": _num(r["best_ic50_nm"]),
+            "cai_after": _num(r["cai_after"]),
+            "error_message": r["error_message"],
+            "file_id": r["file_id"],
+            "file_name": r["original_name"],
+            # Computed, not stored: the schema has no column for it and the
+            # application user cannot add one. A stat per row, not a query.
+            "file_available": bool(r["stored_path"]) and os.path.exists(r["stored_path"]),
+            "alleles": r["alleles"].split(",") if r["alleles"] else [],
+            "top_gene": r["top_gene"],
+            "top_peptide": r["top_peptide"],
+        } for r in rows],
+    }
+
+
+def run_detail(db: Session, run: PipelineRun) -> Dict[str, Any]:
+    """
+    Everything needed to re-render a past run.
+
+    With the result file present, `result` is the exact JSON the run returned
+    and the page renders as it first did. Without it, result is None,
+    result_available is False, and the stored rows — targets and headline
+    figures — are what's left to show.
+    """
+    mfile = db.get(MutationFile, run.file_id)
+    result = load_result(run)
+    return {
+        **run_summary(run),
+        "file_name": mfile.original_name if mfile else None,
+        "file_available": bool(mfile and os.path.exists(mfile.stored_path)),
+        "result_available": result is not None,
+        "result": result,
+    }
+
+
+_corpus_by_pmid: Optional[Dict[str, Dict[str, Any]]] = None
+
+
+def _corpus_lookup(pmid: str) -> Optional[Dict[str, Any]]:
+    """
+    The indexed abstract for a PMID, loaded once from corpus.json.
+
+    message_citation stores which abstracts were cited, not their text. The
+    snippet shown under a reopened answer is rebuilt from the corpus with the
+    copilot's own trimming, so it matches what was shown the first time.
+    """
+    global _corpus_by_pmid
+    if _corpus_by_pmid is None:
+        from .tier4.retriever import CORPUS_PATH
+        try:
+            with open(CORPUS_PATH, encoding="utf-8") as fh:
+                _corpus_by_pmid = {str(d["pmid"]): d for d in json.load(fh)}
+        except (OSError, ValueError):
+            logger.warning("Corpus unavailable; reopened citations will have no snippet")
+            _corpus_by_pmid = {}
+    return _corpus_by_pmid.get(str(pmid))
+
+
+def list_messages(db: Session, run_id: int) -> List[Dict[str, Any]]:
+    """A run's conversation in order, each assistant message with its citations."""
+    from .tier4.copilot import _snippet
+
+    messages = db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.run_id == run_id)
+        .order_by(ChatMessage.created_at, ChatMessage.message_id)
+    ).scalars().all()
+    citations = db.execute(
+        select(MessageCitation)
+        .join(ChatMessage, ChatMessage.message_id == MessageCitation.message_id)
+        .where(ChatMessage.run_id == run_id)
+        .order_by(MessageCitation.citation_id)
+    ).scalars().all()
+
+    by_message: Dict[int, List[Dict[str, Any]]] = {}
+    for c in citations:
+        doc = _corpus_lookup(c.pmid)
+        snippet = (
+            _snippet(f"{doc['title']}\n\n{doc.get('abstract', '')}", doc["title"])
+            if doc else ""
+        )
+        by_message.setdefault(c.message_id, []).append({
+            "pmid": c.pmid,
+            "title": c.title,
+            "journal": c.journal,
+            "year": c.pub_year,
+            "similarity": _num(c.similarity),
+            "snippet": snippet,
+        })
+
+    return [{
+        "message_id": m.message_id,
+        "role": m.role,
+        "content": m.content,
+        "provider": m.provider,
+        "created_at": _iso(m.created_at),
+        "citations": by_message.get(m.message_id, []) if m.role == "assistant" else [],
+    } for m in messages]
+
+
+def delete_run(db: Session, run: PipelineRun) -> Optional[str]:
+    """
+    Delete a run and return the result file it owned, for the caller to
+    remove once the delete has committed.
+
+    A Core DELETE rather than session.delete(): the foreign keys cascade to
+    run_allele, predicted_target, chat_message (and on to message_citation)
+    and cross_check_lookup inside the database. The ORM would otherwise try to
+    null out any children it had loaded. The mutation_file row is untouched;
+    other runs may use the same upload.
+    """
+    path = run.result_path or result_path_for(run.run_id)
+    db.execute(
+        delete(PipelineRun)
+        .where(PipelineRun.run_id == run.run_id)
+        .where(PipelineRun.researcher_id == run.researcher_id)
+    )
+    return path
+
+
+def remove_result_file(path: Optional[str]) -> None:
+    """Remove a result file, but only one inside RESULTS_DIR."""
+    if not path:
+        return
+    root = os.path.realpath(RESULTS_DIR)
+    real = os.path.realpath(path)
+    if os.path.commonpath([root, real]) != root:
+        logger.warning("Refusing to delete result file outside %s: %s", root, path)
+        return
+    try:
+        os.remove(real)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.exception("Could not delete result file %s", real)
+
+
+_STATS_SQL = text("""
+    SELECT
+      (SELECT COUNT(*)                FROM pipeline_run WHERE researcher_id = :rid) AS runs,
+      (SELECT COUNT(DISTINCT file_id) FROM pipeline_run WHERE researcher_id = :rid) AS files,
+      (SELECT COALESCE(SUM(targets_returned), 0)
+                                      FROM pipeline_run WHERE researcher_id = :rid
+                                                          AND status = 'completed') AS targets,
+      (SELECT MIN(best_ic50_nm)       FROM pipeline_run WHERE researcher_id = :rid
+                                                          AND status = 'completed') AS best_ic50,
+      (SELECT COUNT(*)                FROM chat_message WHERE researcher_id = :rid) AS messages
+""")
+
+
+def my_stats(db: Session, researcher_id: int) -> Dict[str, Any]:
+    """
+    The dashboard header, in one statement. Every subquery is served by an
+    index on researcher_id. Targets are summed from the denormalised
+    targets_returned column rather than counted from predicted_target — the
+    reason that column exists.
+    """
+    r = db.execute(_STATS_SQL, {"rid": researcher_id}).mappings().one()
+    return {
+        "total_runs": int(r["runs"]),
+        "distinct_files": int(r["files"]),
+        "total_targets": int(r["targets"]),
+        "best_ic50_nm": _num(r["best_ic50"]),
+        "copilot_messages": int(r["messages"]),
+    }
