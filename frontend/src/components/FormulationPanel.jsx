@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { Panel, Button, Badge } from "./ui";
+import { Panel, Button, Badge, focusRing } from "./ui";
 import { createFormulation, getFormulationOptions } from "../lib/api";
 
 /**
@@ -20,10 +20,6 @@ import { createFormulation, getFormulationOptions } from "../lib/api";
  * Collapsed until opened — a researcher who never formulates should not have
  * to scroll past it, and nothing is fetched until it is.
  */
-
-const focusRing =
-  "focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-core/70 " +
-  "focus-visible:ring-offset-2 focus-visible:ring-offset-void";
 
 const fieldClass =
   "mt-1.5 w-full rounded-lg border border-line bg-void/80 px-3 py-2.5 text-sm " +
@@ -63,13 +59,27 @@ function Source({ node }) {
   );
 }
 
-/** A number out of the backend's provenance envelope, formatted. */
+/**
+ * A value out of the backend's provenance envelope, formatted.
+ *
+ * Most values are numbers or strings, but a constant may carry a small table
+ * — the RNA residue masses arrive as {A: 329.21, U: 306.17, ...}. Rendering
+ * that with String() gives "[object Object]", so a plain object is spread
+ * into "A 329.21 · U 306.17 · ..." instead.
+ */
 function fmt(node, digits) {
   const v = node?.value;
   if (v === null || v === undefined) return "—";
-  if (typeof v !== "number") return String(v);
-  if (digits !== undefined) return v.toFixed(digits);
-  return v.toLocaleString(undefined, { maximumFractionDigits: 6 });
+  if (typeof v === "number") {
+    return digits !== undefined
+      ? v.toFixed(digits)
+      : v.toLocaleString(undefined, { maximumFractionDigits: 6 });
+  }
+  if (typeof v === "object" && !Array.isArray(v)) {
+    return Object.entries(v).map(([k, n]) => `${k} ${n}`).join(" · ");
+  }
+  if (Array.isArray(v)) return v.join(" · ");
+  return String(v);
 }
 
 /** One labelled value on the worksheet, with its provenance and source. */
@@ -209,6 +219,38 @@ export default function FormulationPanel({ runId }) {
     const t = setTimeout(() => compute(inputs), 350);
     return () => clearTimeout(t);
   }, [inputs, runId, compute]);
+
+  // Open every citation before printing, and put them back afterwards.
+  //
+  // The print stylesheet sets `display: block` on each <details> body, which
+  // used to be enough. It is not: Chrome hides a closed disclosure's content
+  // through ::details-content, which an inherited display cannot override, so
+  // the sheet printed with every "source" line empty — the exact failure the
+  // stylesheet exists to prevent. Forcing the open attribute works in every
+  // browser, and beforeprint covers the browser's own Ctrl+P as well as the
+  // panel's Print button.
+  useEffect(() => {
+    if (!open) return;
+    let restore = [];
+
+    const expand = () => {
+      const panel = document.querySelector(".cs-formulation");
+      if (!panel) return;
+      restore = [...panel.querySelectorAll("details")].filter((d) => !d.open);
+      restore.forEach((d) => { d.open = true; });
+    };
+    const collapse = () => {
+      restore.forEach((d) => { d.open = false; });
+      restore = [];
+    };
+
+    window.addEventListener("beforeprint", expand);
+    window.addEventListener("afterprint", collapse);
+    return () => {
+      window.removeEventListener("beforeprint", expand);
+      window.removeEventListener("afterprint", collapse);
+    };
+  }, [open]);
 
   const set = (key) => (v) => setInputs((prev) => ({ ...prev, [key]: v }));
 

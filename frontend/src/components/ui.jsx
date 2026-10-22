@@ -1,3 +1,17 @@
+/**
+ * The app's keyboard focus ring — one definition, imported wherever a
+ * focusable element is styled.
+ *
+ * focus:outline-none removes the browser default, so anything that drops this
+ * class has no visible focus state at all; it was previously copied into five
+ * components and left off the shared Button, which is exactly the drift a
+ * single export prevents. ring-offset-void sets the gap to the page
+ * background, so the ring reads as a ring rather than a thick border.
+ */
+export const focusRing =
+  "focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-core/70 " +
+  "focus-visible:ring-offset-2 focus-visible:ring-offset-void";
+
 export function Panel({ children, className = "", ...rest }) {
   return (
     <div
@@ -11,7 +25,8 @@ export function Panel({ children, className = "", ...rest }) {
 
 export function Button({ variant = "primary", className = "", ...rest }) {
   const base =
-    "inline-flex items-center justify-center gap-2 rounded-lg px-5 py-3 text-[15px] font-medium transition disabled:opacity-40 disabled:cursor-not-allowed";
+    "inline-flex items-center justify-center gap-2 rounded-lg px-5 py-3 text-[15px] font-medium transition disabled:opacity-40 disabled:cursor-not-allowed " +
+    focusRing;
   const styles = {
     primary:
       "bg-cyan-core text-void hover:bg-cyan-glow shadow-[0_0_28px_-6px_rgba(56,189,248,.65)]",

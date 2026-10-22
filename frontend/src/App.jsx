@@ -11,10 +11,7 @@ import LogoMark from "./components/LogoMark";
 import { openStoredRun, runPipelineReal } from "./lib/mockApi";
 import { logout, me } from "./lib/auth";
 import { SESSION_EXPIRED_EVENT } from "./lib/api";
-
-const focusRing =
-  "focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-core/70 " +
-  "focus-visible:ring-offset-2 focus-visible:ring-offset-void";
+import { focusRing } from "./components/ui";
 
 /** #/runs/42 -> 42. A saved run's address, so it can be reloaded or shared. */
 function runIdFromHash() {

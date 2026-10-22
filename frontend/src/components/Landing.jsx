@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { focusRing } from "./ui";
 
 /**
  * Landing page.
@@ -66,8 +67,7 @@ function Reveal({ children, delay = 0, className = "" }) {
 function CTA({ children, onClick, variant = "solid" }) {
   const base =
     "inline-flex items-center justify-center gap-2 rounded-xl px-6 py-3 text-sm font-semibold " +
-    "transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-core/70 " +
-    "focus-visible:ring-offset-2 focus-visible:ring-offset-void";
+    "transition-all duration-200 " + focusRing;
 
   const styles =
     variant === "solid"

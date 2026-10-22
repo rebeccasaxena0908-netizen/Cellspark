@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 import { login, signup } from "../lib/auth";
-import { Button } from "./ui";
+import { Button, focusRing } from "./ui";
 
 /**
  * Sign in / create account.
@@ -14,10 +14,6 @@ import { Button } from "./ui";
 const MIN_PASSWORD = 8;
 const MAX_PASSWORD_BYTES = 72;   // bcrypt reads no further
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-const focusRing =
-  "focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-core/70 " +
-  "focus-visible:ring-offset-2 focus-visible:ring-offset-void";
 
 function validate(mode, f) {
   const e = {};

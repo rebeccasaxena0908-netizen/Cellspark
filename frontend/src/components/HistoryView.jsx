@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { deleteRun, getMyStats, listRuns } from "../lib/api";
-import { Badge, Button, Eyebrow, Panel } from "./ui";
+import { Badge, Button, Eyebrow, Panel, focusRing } from "./ui";
 
 /**
  * The signed-in researcher's past runs.
@@ -11,10 +11,6 @@ import { Badge, Button, Eyebrow, Panel } from "./ui";
  */
 
 const PAGE = 20;
-
-const focusRing =
-  "focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-core/70 " +
-  "focus-visible:ring-offset-2 focus-visible:ring-offset-void";
 
 function formatDate(iso) {
   const d = new Date(iso);

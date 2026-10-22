@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Badge } from "./ui";
+import { Badge, focusRing } from "./ui";
 
 /**
  * What produced the answer the user is reading.
@@ -42,7 +42,7 @@ export function PassageRow({ passage }) {
           target="_blank"
           rel="noreferrer"
           onClick={(e) => e.stopPropagation()}
-          className="shrink-0 rounded font-mono text-[11px] text-cyan-glow underline decoration-cyan-core/30 underline-offset-2 transition hover:decoration-cyan-core focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-core"
+          className={`shrink-0 rounded font-mono text-[11px] text-cyan-glow underline decoration-cyan-core/30 underline-offset-2 transition hover:decoration-cyan-core ${focusRing}`}
           title={`Open PMID ${passage.pmid} on PubMed`}
         >
           {passage.pmid}
@@ -52,7 +52,7 @@ export function PassageRow({ passage }) {
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
-          className="min-w-0 flex-1 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-core"
+          className={`min-w-0 flex-1 rounded text-left ${focusRing}`}
         >
           <span className="flex items-baseline gap-2">
             {/* line-clamp, not slice — the full title stays selectable and findable */}

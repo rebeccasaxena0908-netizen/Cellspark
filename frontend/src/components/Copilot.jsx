@@ -1,12 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { askCopilot } from "../lib/mockApi";
-import { Panel } from "./ui";
+import { Panel, focusRing } from "./ui";
 import { Evidence } from "./Passages";
-
-// Same keyboard focus treatment as the rest of the app.
-const focusRing =
-  "focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-core/70 " +
-  "focus-visible:ring-offset-2 focus-visible:ring-offset-void";
 
 const SUGGESTIONS = [
   "What does IC50 mean here?",
@@ -144,7 +139,7 @@ export default function Copilot({ result }) {
             placeholder="Type a question"
             disabled={readOnly}
             aria-label="Ask a question about these results"
-            className="min-w-0 flex-1 rounded-lg border border-line bg-void px-4 py-3 text-sm text-ink placeholder:text-ink-mute focus:border-cyan-core focus:outline-none"
+            className={`min-w-0 flex-1 rounded-lg border border-line bg-void px-4 py-3 text-sm text-ink placeholder:text-ink-mute focus:border-cyan-core ${focusRing}`}
           />
           <button
             onClick={() => send()}

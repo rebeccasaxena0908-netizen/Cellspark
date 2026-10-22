@@ -1,6 +1,6 @@
 import { Fragment, useState } from "react";
 import { bandFor } from "../lib/mockApi";
-import { Panel, Badge } from "./ui";
+import { Panel, Badge, focusRing } from "./ui";
 import { SequenceChars, SequenceLegend } from "./SequenceLegend";
 import { PassageRow } from "./Passages";
 import { crossCheck } from "../lib/mockApi";
@@ -196,7 +196,7 @@ export default function TargetsTable({ targets, result }) {
                           onClick={(e) => { e.stopPropagation(); runCrossCheck(t); }}
                           disabled={busy !== null}
                           aria-label={`Cross-check ${t.gene} ${t.change} against the indexed corpus`}
-                          className="whitespace-nowrap rounded-full border border-line px-2.5 py-1 text-[11px] text-ink-dim transition hover:border-cyan-core/55 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-core disabled:opacity-40"
+                          className={`whitespace-nowrap rounded-full border border-line px-2.5 py-1 text-[11px] text-ink-dim transition hover:border-cyan-core/55 hover:text-ink disabled:opacity-40 ${focusRing}`}
                         >
                           {busy === t.rank ? "Checking…" : "Cross-check"}
                         </button>

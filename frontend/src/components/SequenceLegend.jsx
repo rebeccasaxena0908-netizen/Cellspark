@@ -13,6 +13,7 @@
  * lookup table does not.
  */
 import { AMINO_GROUPS, RNA_BASES, describe } from "../lib/sequence";
+import { focusRing } from "./ui";
 
 /**
  * A sequence rendered one letter at a time, each naming itself on hover.
@@ -76,7 +77,7 @@ function ResidueCell({ letter, code, name }) {
 export function SequenceLegend({ className = "" }) {
   return (
     <details className={`cs-inset group ${className}`}>
-      <summary className="cursor-pointer list-none rounded-xl px-4 py-3 text-sm text-ink-dim transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-core">
+      <summary className={`cursor-pointer list-none rounded-xl px-4 py-3 text-sm text-ink-dim transition hover:text-ink ${focusRing}`}>
         <span className="inline-flex items-center gap-2">
           <span
             aria-hidden="true"

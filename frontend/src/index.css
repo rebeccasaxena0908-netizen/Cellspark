@@ -306,8 +306,16 @@ h1, h2, h3, h4 {
     text-shadow: none !important;
   }
 
-  /* Sources and notes print; a disclosure cannot be opened on paper. */
+  /* Sources and notes print; a disclosure cannot be opened on paper.
+     display alone is not enough — Chrome hides a closed disclosure's content
+     through ::details-content, so that is unhidden too. FormulationPanel also
+     sets the open attribute on beforeprint, which is what actually carries
+     browsers that support neither; these rules are the belt to that braces. */
   .cs-formulation details > *:not(summary) { display: block !important; }
+  .cs-formulation details::details-content {
+    content-visibility: visible !important;
+    block-size: auto !important;
+  }
   .cs-formulation details summary {
     list-style: none;
     text-decoration: none !important;
