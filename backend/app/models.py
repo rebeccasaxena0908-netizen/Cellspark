@@ -12,8 +12,10 @@ hashes, CHAR(64) SHA-256 digests, ENUMs) so that the mapping and the DDL can be
 read side by side. server_default marks columns that the database fills in,
 so the ORM leaves them out of the INSERT instead of sending NULL.
 
-All nine tables are mapped now. Phase 1 uses researcher and auth_session;
-phases 2 and 3 use the rest.
+All nine tables of schema.sql are mapped here. Phase 1 uses researcher and
+auth_session; phases 2 and 3 use the rest. The two formulation tables at the
+bottom come from schema_formulation.sql, which is a separate file applied as
+root; the same rules apply to them.
 """
 
 from datetime import datetime
@@ -182,6 +184,94 @@ class MessageCitation(Base):
     journal: Mapped[Optional[str]] = mapped_column(String(200))
     pub_year: Mapped[Optional[int]] = mapped_column(SMALLINT(unsigned=True))
     similarity: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(6, 4))
+
+
+# ---------------------------------------------------------------- formulation
+class FormulationSpec(Base):
+    """
+    One worked formulation for one run. Mapped onto schema_formulation.sql,
+    which is applied as root separately from schema.sql's nine tables.
+
+    The columns are grouped as the DDL groups them, by provenance: what was
+    computed from the sequence, what the user supplied, and which published
+    formulation it was worked against. patient_weight_kg is the only patient
+    attribute the system stores beyond the mutation file itself.
+    """
+    __tablename__ = "formulation_spec"
+
+    formulation_id: Mapped[int] = mapped_column(UBIGINT, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(
+        UBIGINT, ForeignKey("pipeline_run.run_id", ondelete="CASCADE"), index=True
+    )
+    researcher_id: Mapped[int] = mapped_column(
+        UBIGINT, ForeignKey("researcher.researcher_id", ondelete="CASCADE"), index=True
+    )
+
+    # computed from the sequence
+    nucleotide_length: Mapped[int] = mapped_column(UINT)
+    count_a: Mapped[int] = mapped_column(UINT)
+    count_u: Mapped[int] = mapped_column(UINT)
+    count_g: Mapped[int] = mapped_column(UINT)
+    count_c: Mapped[int] = mapped_column(UINT)
+    molecular_weight_da: Mapped[Decimal] = mapped_column(DECIMAL(14, 2))
+
+    # assumptions supplied by the user
+    patient_weight_kg: Mapped[Decimal] = mapped_column(DECIMAL(5, 2))
+    dose_per_kg_mcg: Mapped[Decimal] = mapped_column(DECIMAL(6, 3))
+    concentration_mcg_ml: Mapped[Decimal] = mapped_column(DECIMAL(8, 2))
+    np_ratio: Mapped[Decimal] = mapped_column(DECIMAL(5, 2))
+    route: Mapped[str] = mapped_column(String(60))
+    schedule_label: Mapped[str] = mapped_column(String(120))
+
+    # computed from sequence + assumptions
+    dose_mcg: Mapped[Decimal] = mapped_column(DECIMAL(10, 3))
+    injection_volume_ml: Mapped[Decimal] = mapped_column(DECIMAL(8, 3))
+    mrna_nanomoles: Mapped[Decimal] = mapped_column(DECIMAL(12, 6))
+    phosphate_micromoles: Mapped[Decimal] = mapped_column(DECIMAL(12, 6))
+    total_lipid_mass_mg: Mapped[Decimal] = mapped_column(DECIMAL(10, 4))
+
+    # the published formulation this was worked against
+    preset_key: Mapped[str] = mapped_column(String(40))
+    preset_label: Mapped[str] = mapped_column(String(120))
+    preset_citation: Mapped[str] = mapped_column(String(300))
+    target_size_nm_min: Mapped[Optional[int]] = mapped_column(SMALLINT(unsigned=True))
+    target_size_nm_max: Mapped[Optional[int]] = mapped_column(SMALLINT(unsigned=True))
+
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    lipids: Mapped[List["FormulationLipid"]] = relationship(
+        passive_deletes=True, order_by="FormulationLipid.lipid_id"
+    )
+
+
+class FormulationLipid(Base):
+    """
+    The four lipids of one formulation, one row each.
+
+    molar_pct and molecular_weight_da are SNAPSHOT here at calculation time
+    rather than read from tier5.constants when the worksheet is reopened. If a
+    published constant is later corrected, a saved worksheet keeps the values
+    it was actually computed with — a stored sheet whose numbers silently
+    change is worse than one that is out of date.
+    """
+    __tablename__ = "formulation_lipid"
+
+    lipid_id: Mapped[int] = mapped_column(UBIGINT, primary_key=True, autoincrement=True)
+    formulation_id: Mapped[int] = mapped_column(
+        UBIGINT,
+        ForeignKey("formulation_spec.formulation_id", ondelete="CASCADE"),
+        index=True,
+    )
+
+    role: Mapped[str] = mapped_column(
+        ENUM("ionizable", "helper", "cholesterol", "peg")
+    )
+    lipid_name: Mapped[str] = mapped_column(String(80))
+    molar_pct: Mapped[Decimal] = mapped_column(DECIMAL(5, 2))
+    molecular_weight_da: Mapped[Decimal] = mapped_column(DECIMAL(10, 2))
+
+    micromoles: Mapped[Decimal] = mapped_column(DECIMAL(12, 6))
+    mass_mg: Mapped[Decimal] = mapped_column(DECIMAL(10, 4))
 
 
 class CrossCheckLookup(Base):

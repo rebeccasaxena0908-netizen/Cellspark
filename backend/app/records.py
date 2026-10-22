@@ -1,5 +1,6 @@
 """
-Persistence for researcher work: files, runs, targets, chats, cross-checks.
+Persistence for researcher work: files, runs, targets, chats, cross-checks
+and Tier 5 formulation worksheets.
 
 The routes in main.py call these; nothing in the pipeline or the tiers knows
 the database exists. Functions here add and update rows but never commit —
@@ -31,6 +32,8 @@ from sqlalchemy.orm import Session
 from .models import (
     ChatMessage,
     CrossCheckLookup,
+    FormulationLipid,
+    FormulationSpec,
     MessageCitation,
     MutationFile,
     PipelineRun,
@@ -685,3 +688,190 @@ def my_stats(db: Session, researcher_id: int) -> Dict[str, Any]:
         "best_ic50_nm": _num(r["best_ic50"]),
         "copilot_messages": int(r["messages"]),
     }
+
+
+# ---------------------------------------------------------------- formulation
+# Tier 5 worksheets. One formulation_spec row and one formulation_lipid row
+# per lipid, written together in one transaction so a saved worksheet is
+# never missing its lipid table.
+
+class ValueTooWide(ValueError):
+    """
+    A computed value will not fit the DECIMAL column it is bound for.
+
+    Raised rather than silently dropped. Elsewhere in this module `_dec`
+    returns None for an out-of-range score, because one odd score must not
+    cost a whole run its record and the column is nullable. A formulation's
+    columns are NOT NULL and every one of them is load-bearing arithmetic, so
+    the only honest options are to store the real value or to refuse. A
+    truncated lipid mass that still looked plausible would be the worst
+    outcome of the three.
+    """
+
+
+def _exact(value: Any, places: int, digits: int, name: str, unit: str) -> Decimal:
+    """One value as a Decimal guaranteed to fit DECIMAL(digits, places)."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        raise ValueTooWide(f"{name} is not a number.") from None
+    if not math.isfinite(f):
+        raise ValueTooWide(f"{name} is not a finite number.")
+
+    limit = 10 ** (digits - places)
+    if abs(f) >= limit:
+        raise ValueTooWide(
+            f"{name} works out to {f:,.4g} {unit}, which is beyond what this "
+            f"worksheet can store (under {limit:,g}). Check the body weight, "
+            "dose per kg and sequence length."
+        )
+    return Decimal(str(round(f, places)))
+
+
+def _plain(envelope: Any) -> Any:
+    """The number out of a provenance envelope."""
+    return envelope["value"] if isinstance(envelope, dict) else envelope
+
+
+def record_formulation(db: Session, run: PipelineRun, researcher_id: int,
+                       worksheet: Dict[str, Any]) -> FormulationSpec:
+    """
+    Persist one worksheet. Does not commit; the route closes the transaction.
+
+    The lipid rows snapshot the molar percentage and molecular weight they
+    were computed with rather than referencing tier5.constants, so correcting
+    a published constant later cannot change a sheet that is already saved.
+    """
+    seq = worksheet["sequence"]
+    inp = worksheet["inputs"]
+    amt = worksheet["amounts"]
+    preset = worksheet["preset"]
+    size = worksheet["particle_size"]
+
+    spec = FormulationSpec(
+        run_id=run.run_id,
+        researcher_id=researcher_id,
+
+        nucleotide_length=int(_plain(seq["nucleotide_length"])),
+        count_a=int(_plain(seq["count_a"])),
+        count_u=int(_plain(seq["count_u"])),
+        count_g=int(_plain(seq["count_g"])),
+        count_c=int(_plain(seq["count_c"])),
+        molecular_weight_da=_exact(
+            _plain(seq["molecular_weight_da"]), 2, 14, "The molecular weight", "Da"),
+
+        patient_weight_kg=_exact(
+            _plain(inp["patient_weight_kg"]), 2, 5, "The body weight", "kg"),
+        dose_per_kg_mcg=_exact(
+            _plain(inp["dose_per_kg_mcg"]), 3, 6, "The dose per kg", "ug/kg"),
+        concentration_mcg_ml=_exact(
+            _plain(inp["concentration_mcg_ml"]), 2, 8, "The concentration", "ug/mL"),
+        np_ratio=_exact(_plain(inp["np_ratio"]), 2, 5, "The N/P ratio", ""),
+        route=_text(_plain(inp["route"]), 60) or "",
+        schedule_label=_text(_plain(inp["schedule"]), 120) or "",
+
+        dose_mcg=_exact(_plain(amt["dose_mcg"]), 3, 10, "The dose", "ug"),
+        injection_volume_ml=_exact(
+            _plain(amt["injection_volume_ml"]), 3, 8, "The injection volume", "mL"),
+        mrna_nanomoles=_exact(
+            _plain(amt["mrna_nanomoles"]), 6, 12, "The mRNA amount", "nmol"),
+        phosphate_micromoles=_exact(
+            _plain(amt["phosphate_micromoles"]), 6, 12,
+            "The RNA phosphate amount", "umol"),
+        total_lipid_mass_mg=_exact(
+            _plain(amt["total_lipid_mass_mg"]), 4, 10, "The total lipid mass", "mg"),
+
+        preset_key=_text(preset["key"], 40) or "",
+        preset_label=_text(preset["label"], 120) or "",
+        preset_citation=_text(preset["citation"], 300) or "",
+        target_size_nm_min=int(_plain(size["target_size_nm_min"])),
+        target_size_nm_max=int(_plain(size["target_size_nm_max"])),
+    )
+    db.add(spec)
+    db.flush()          # assigns formulation_id for the lipid rows below
+
+    for lipid in worksheet["lipids"]:
+        db.add(FormulationLipid(
+            formulation_id=spec.formulation_id,
+            role=lipid["role"],
+            lipid_name=_text(lipid["name"], 80) or "",
+            molar_pct=_exact(
+                _plain(lipid["molar_pct"]), 2, 5,
+                f"{lipid['name']}'s molar percentage", "mol%"),
+            molecular_weight_da=_exact(
+                _plain(lipid["molecular_weight_da"]), 2, 10,
+                f"{lipid['name']}'s molecular weight", "Da"),
+            micromoles=_exact(
+                _plain(lipid["micromoles"]), 6, 12,
+                f"The {lipid['name']} amount", "umol"),
+            mass_mg=_exact(
+                _plain(lipid["mass_mg"]), 4, 10,
+                f"The {lipid['name']} mass", "mg"),
+        ))
+    db.flush()
+    return spec
+
+
+def formulation_row(spec: FormulationSpec) -> Dict[str, Any]:
+    """
+    A saved spec as the history list shows it: the headline figures only.
+
+    The full worksheet is recomputed on demand rather than stored as JSON, so
+    this is deliberately a summary and says which preset produced it.
+    """
+    return {
+        "formulation_id": spec.formulation_id,
+        "run_id": spec.run_id,
+        "created_at": _iso(spec.created_at),
+        "preset_key": spec.preset_key,
+        "preset_label": spec.preset_label,
+        "preset_citation": spec.preset_citation,
+        "nucleotide_length": int(spec.nucleotide_length),
+        "molecular_weight_da": _num(spec.molecular_weight_da),
+        "patient_weight_kg": _num(spec.patient_weight_kg),
+        "dose_per_kg_mcg": _num(spec.dose_per_kg_mcg),
+        "concentration_mcg_ml": _num(spec.concentration_mcg_ml),
+        "np_ratio": _num(spec.np_ratio),
+        "route": spec.route,
+        "schedule_label": spec.schedule_label,
+        "dose_mcg": _num(spec.dose_mcg),
+        "injection_volume_ml": _num(spec.injection_volume_ml),
+        "total_lipid_mass_mg": _num(spec.total_lipid_mass_mg),
+        "lipids": [
+            {
+                "role": l.role,
+                "name": l.lipid_name,
+                "molar_pct": _num(l.molar_pct),
+                "molecular_weight_da": _num(l.molecular_weight_da),
+                "micromoles": _num(l.micromoles),
+                "mass_mg": _num(l.mass_mg),
+            }
+            for l in spec.lipids
+        ],
+    }
+
+
+def list_formulations(db: Session, run_id: int) -> List[Dict[str, Any]]:
+    """Saved worksheets for one run, newest first. Ownership is the caller's."""
+    specs = db.scalars(
+        select(FormulationSpec)
+        .where(FormulationSpec.run_id == run_id)
+        .order_by(FormulationSpec.created_at.desc(), FormulationSpec.formulation_id.desc())
+    ).all()
+    return [formulation_row(s) for s in specs]
+
+
+def get_owned_formulation(db: Session, researcher_id: int,
+                          formulation_id: int) -> Optional[FormulationSpec]:
+    """
+    One saved worksheet, scoped to its owner.
+
+    Filtered on researcher_id like every other lookup here: someone else's
+    formulation_id comes back None and the route turns that into 404.
+    """
+    return db.scalars(
+        select(FormulationSpec).where(
+            FormulationSpec.formulation_id == formulation_id,
+            FormulationSpec.researcher_id == researcher_id,
+        )
+    ).first()

@@ -136,3 +136,33 @@ export function deleteRun(runId) {
 export function getMyStats() {
   return request("/me/stats");
 }
+
+// ------------------------------------------------------------- formulation
+
+/** The presets, routes, schedules and defaults the formulation panel offers. */
+export function getFormulationOptions() {
+  return request("/formulation/options");
+}
+
+/**
+ * Compute and save one formulation worksheet for a run.
+ *
+ * The sequence is not sent: the server formulates the Tier 3 construct it
+ * stored for this run. Everything here is an input the researcher chose, and
+ * the response labels each one as such.
+ */
+export function createFormulation(runId, inputs) {
+  return request(`/runs/${encodeURIComponent(runId)}/formulation`, {
+    method: "POST",
+    body: JSON.stringify(inputs),
+  });
+}
+
+export function listFormulations(runId) {
+  return request(`/runs/${encodeURIComponent(runId)}/formulations`);
+}
+
+/** The saved worksheet as a machine-readable protocol, from its snapshot. */
+export function exportFormulation(formulationId) {
+  return request(`/formulations/${encodeURIComponent(formulationId)}/export.json`);
+}

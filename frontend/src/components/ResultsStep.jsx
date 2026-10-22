@@ -1,6 +1,7 @@
 import { Panel, Button, Eyebrow, Badge } from "./ui";
 import TargetsTable from "./TargetsTable";
 import MrnaPanel from "./MrnaPanel";
+import FormulationPanel from "./FormulationPanel";
 import Copilot from "./Copilot";
 
 function Stat({ label, value }) {
@@ -96,6 +97,12 @@ export default function ResultsStep({ result, onRestart, onBack }) {
         <div className="min-w-0 space-y-6 lg:col-span-2">
           <TargetsTable targets={targets} result={result} />
           {mrna && <MrnaPanel mrna={mrna} />}
+          {/* Tier 5 sits under the mRNA panel: it formulates what that panel
+              shows. Needs a saved run, because the server formulates the
+              construct it stored rather than one sent from here. */}
+          {mrna && result.apiRaw?.run_id && (
+            <FormulationPanel runId={result.apiRaw.run_id} />
+          )}
 
           <Panel className="p-5">
             <h3 className="font-display text-lg font-semibold">Search performance</h3>

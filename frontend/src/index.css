@@ -251,3 +251,90 @@ h1, h2, h3, h4 {
   .cs-reveal { opacity: 1; animation: none; }
   .cs-pulse, .cs-spine { animation: none; }
 }
+/* ---------------------------------------------------------------------------
+   Print — the formulation worksheet
+   ---------------------------------------------------------------------------
+   The "print-friendly view" is this stylesheet rather than a second render
+   of the panel or a PDF library: one worksheet, printed from the markup
+   already on screen, so the two cannot disagree about what the numbers are.
+
+   Everything on the page is hidden and the worksheet alone is made visible,
+   then lifted to the top-left so it does not print on page three after a
+   stack of blank space where the rest of the results used to be. visibility
+   rather than display, because a display:none ancestor would take the panel
+   down with it.
+
+   The app's palette is near-black on near-black ink; on paper it is forced to
+   black on white. Citations and notes are inside <details>, which the browser
+   collapses by default: they are forced open, because a printed worksheet
+   whose sources are hidden in a disclosure nobody can click is exactly the
+   sheet this module exists not to produce.
+--------------------------------------------------------------------------- */
+@media print {
+  html, body {
+    background: #fff !important;
+    color: #000 !important;
+  }
+
+  body * { visibility: hidden !important; }
+
+  .cs-formulation,
+  .cs-formulation * { visibility: visible !important; }
+
+  .cs-formulation {
+    position: absolute !important;
+    top: 0;
+    left: 0;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: #fff !important;
+    backdrop-filter: none !important;
+    box-shadow: none !important;
+  }
+
+  /* Buttons and the collapse toggle are not worth paper. */
+  .cs-no-print,
+  .cs-formulation button[aria-expanded] span[aria-hidden="true"] { display: none !important; }
+
+  .cs-formulation,
+  .cs-formulation * {
+    color: #000 !important;
+    background-color: transparent !important;
+    text-shadow: none !important;
+  }
+
+  /* Sources and notes print; a disclosure cannot be opened on paper. */
+  .cs-formulation details > *:not(summary) { display: block !important; }
+  .cs-formulation details summary {
+    list-style: none;
+    text-decoration: none !important;
+  }
+
+  /* The not-for-clinical-use line must survive the colour flattening above,
+     so it keeps a visible rule rather than relying on its tinted panel. */
+  .cs-formulation .cs-print-note {
+    border: 1.5pt solid #000 !important;
+    font-weight: 600;
+    page-break-inside: avoid;
+  }
+
+  .cs-formulation section {
+    border: 0.5pt solid #666 !important;
+    page-break-inside: avoid;
+  }
+
+  .cs-formulation table { width: 100% !important; min-width: 0 !important; }
+  .cs-formulation .overflow-x-auto { overflow: visible !important; }
+
+  /* Badges lose their fill, so the provenance class needs an outline to stay
+     legible — it is the one thing on the sheet that must not drop out. */
+  .cs-formulation .rounded-full {
+    border: 0.5pt solid #000 !important;
+    padding: 0 2pt !important;
+  }
+
+  @page { margin: 14mm; }
+}

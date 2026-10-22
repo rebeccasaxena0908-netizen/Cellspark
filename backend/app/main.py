@@ -31,6 +31,8 @@ from .tier4.copilot import (
     cross_check as copilot_cross_check,
 )
 from .tier4.retriever import corpus_info
+from .tier5 import constants as tier5_constants
+from .tier5.formulate import FormulationError, export_document, formulate
 from .upload import describe_upload, save_upload, sha256_hex, upload_id_for
 
 logger = logging.getLogger("cellspark.api")
@@ -130,6 +132,42 @@ class CrossCheckRequest(BaseModel):
     run_id: int = Field(..., description="The run the target came from")
     gene: str = Field(..., max_length=30, description="Gene symbol, e.g. KRAS")
     change: str = Field(default="", max_length=30, description="Protein change, e.g. p.G12D")
+
+
+class FormulationRequest(BaseModel):
+    """
+    The inputs to one formulation worksheet.
+
+    Every field here is an ASSUMPTION in the provenance scheme — a number the
+    researcher chose. In particular dose_per_kg_mcg is an input with no
+    clinical standing in this system, which is why it arrives in the request
+    body rather than being decided by the server. The response labels it as
+    such and the UI renders it in the inputs section, never as a result.
+
+    The bounds are validation, not guidance. They keep a typo from reaching
+    the database as a driver error; they do not endorse any value inside them.
+    """
+    patient_weight_kg: float = Field(
+        default=70.0, gt=0, le=999.99, description="Body weight, kg")
+    dose_per_kg_mcg: float = Field(
+        default=tier5_constants.DEFAULT_DOSE_PER_KG_MCG, gt=0, le=999.999,
+        description="Assumed loading in ug/kg. An input, not a recommendation.")
+    concentration_mcg_ml: float = Field(
+        default=tier5_constants.DEFAULT_CONCENTRATION_MCG_ML, gt=0, le=999999.99,
+        description="Formulated concentration, ug/mL")
+    np_ratio: float = Field(
+        default=tier5_constants.DEFAULT_NP_RATIO, gt=0, le=999.99,
+        description="Nitrogen-to-phosphate molar ratio")
+    preset_key: str = Field(
+        default=tier5_constants.DEFAULT_PRESET, max_length=40,
+        description="Published lipid system to work against")
+    route: Optional[str] = Field(default=None, max_length=60)
+    schedule: Optional[str] = Field(default=None, max_length=120)
+    # Which part of the Tier 3 output to formulate. The full construct is the
+    # molecule a lab would actually make — UTRs and poly-A tail included — so
+    # it is the default; the coding sequence alone is offered because that is
+    # what the mRNA panel displays and a reader may want the two to agree.
+    sequence_region: Literal["full_construct", "coding_sequence"] = "full_construct"
 
 
 class SignupRequest(BaseModel):
@@ -400,6 +438,177 @@ def delete_run(
     db.commit()
     records.remove_result_file(path)
     return {"deleted": run_id}
+
+
+# ------------------------------------------------------------ formulation
+# Tier 5. These routes compute and store a formulation WORKSHEET: arithmetic
+# on the run's own sequence plus inputs the researcher supplied. Nothing here
+# is a dosing recommendation, and the response says so on every value it
+# returns — see app/tier5/formulate.py.
+
+def _construct_for(run, region: str) -> str:
+    """
+    The Tier 3 sequence to formulate, or a 409 explaining what is missing.
+
+    409 rather than 404: the run exists and belongs to the caller, it just has
+    nothing to formulate yet. The two cases are different things to fix, so
+    they get different messages.
+    """
+    result = records.load_result(run) if run.status == "completed" else None
+    if result is None:
+        raise HTTPException(
+            status_code=409,
+            detail="This run has no stored result to formulate. Run the "
+                   "analysis again.",
+        )
+
+    tier3 = result.get("tier3") or {}
+    if not tier3.get("implemented"):
+        reason = tier3.get("note") or tier3.get("error") or "no reason recorded"
+        raise HTTPException(
+            status_code=409,
+            detail=f"This run has no Tier 3 mRNA construct to formulate "
+                   f"({reason}). A formulation needs an optimised sequence.",
+        )
+
+    sequence = tier3.get(region) or tier3.get("coding_sequence")
+    if not sequence:
+        raise HTTPException(
+            status_code=409,
+            detail="This run's Tier 3 result carries no sequence to formulate.",
+        )
+    return sequence
+
+
+@app.post("/api/runs/{run_id}/formulation")
+def create_formulation(
+    run_id: int,
+    req: FormulationRequest,
+    researcher: Researcher = Depends(auth.require_researcher),
+    db: Session = Depends(get_db),
+):
+    """
+    Work a formulation for one run, save it, and return the full worksheet.
+
+    The sequence comes from the server's stored Tier 3 result, never from the
+    request: a client cannot ask for a worksheet about a sequence this run did
+    not produce.
+    """
+    run = _owned_run(db, researcher, run_id)
+    sequence = _construct_for(run, req.sequence_region)
+
+    try:
+        worksheet = formulate(
+            sequence=sequence,
+            patient_weight_kg=req.patient_weight_kg,
+            dose_per_kg_mcg=req.dose_per_kg_mcg,
+            concentration_mcg_ml=req.concentration_mcg_ml,
+            np_ratio=req.np_ratio,
+            preset_key=req.preset_key,
+            route=req.route,
+            schedule=req.schedule,
+        )
+    except FormulationError as e:
+        # A bad input the caller can fix, with the reason it was rejected.
+        raise HTTPException(status_code=400, detail=str(e)) from None
+
+    try:
+        spec = records.record_formulation(db, run, researcher.researcher_id, worksheet)
+        db.commit()
+    except records.ValueTooWide as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e)) from None
+
+    worksheet["formulation_id"] = spec.formulation_id
+    worksheet["run_id"] = run.run_id
+    worksheet["sequence_region"] = req.sequence_region
+    return worksheet
+
+
+@app.get("/api/runs/{run_id}/formulations")
+def get_formulations(
+    run_id: int,
+    researcher: Researcher = Depends(auth.require_researcher),
+    db: Session = Depends(get_db),
+):
+    """Saved worksheets for one of the caller's runs, newest first."""
+    run = _owned_run(db, researcher, run_id)
+    return {
+        "run_id": run.run_id,
+        "formulations": records.list_formulations(db, run.run_id),
+    }
+
+
+@app.get("/api/formulations/{formulation_id}/export.json")
+def export_formulation(
+    formulation_id: int,
+    researcher: Researcher = Depends(auth.require_researcher),
+    db: Session = Depends(get_db),
+):
+    """
+    One saved worksheet as a machine-readable protocol.
+
+    Built from the stored snapshot, so it shows the constants the worksheet
+    was computed with rather than today's. Carries the inputs as well as the
+    outputs, and the not-for-clinical-use statement.
+    """
+    spec = records.get_owned_formulation(db, researcher.researcher_id, formulation_id)
+    if spec is None:
+        raise HTTPException(status_code=404, detail="Formulation not found.")
+    return export_document(records.formulation_row(spec))
+
+
+@app.get("/api/formulation/options")
+def formulation_options():
+    """
+    The presets, routes, schedules and defaults the panel offers.
+
+    Served from the backend so the published ratios and citations have one
+    home. Each default carries the statement of what it rests on, which for
+    the dosing inputs is nothing clinical.
+    """
+    return {
+        "presets": [
+            {
+                "key": preset.key,
+                "label": preset.label,
+                "citation": preset.citation,
+                "target_size_nm": list(preset.target_size_nm),
+                "lipids": [
+                    {
+                        "role": lipid.role,
+                        "name": lipid.name,
+                        "molar_pct": lipid.molar_pct,
+                        "molecular_weight_da": lipid.molecular_weight_da,
+                        "mw_is_nominal": lipid.mw_is_nominal,
+                        "citation": lipid.citation,
+                    }
+                    for lipid in preset.lipids
+                ],
+            }
+            for preset in tier5_constants.PRESETS.values()
+        ],
+        "routes": list(tier5_constants.ROUTE_OPTIONS),
+        "schedules": list(tier5_constants.SCHEDULE_OPTIONS),
+        "defaults": {
+            "preset_key": tier5_constants.DEFAULT_PRESET,
+            "patient_weight_kg": 70.0,
+            "dose_per_kg_mcg": tier5_constants.DEFAULT_DOSE_PER_KG_MCG,
+            "concentration_mcg_ml": tier5_constants.DEFAULT_CONCENTRATION_MCG_ML,
+            "np_ratio": tier5_constants.DEFAULT_NP_RATIO,
+            "route": tier5_constants.DEFAULT_ROUTE,
+            "schedule": tier5_constants.DEFAULT_SCHEDULE,
+        },
+        "bases": {
+            "patient_weight_kg": tier5_constants.WEIGHT_BASIS,
+            "dose_per_kg_mcg": tier5_constants.DOSE_PER_KG_BASIS,
+            "concentration_mcg_ml": tier5_constants.CONCENTRATION_BASIS,
+            "np_ratio": tier5_constants.NP_RATIO_CITATION,
+            "route": tier5_constants.ROUTE_BASIS,
+            "schedule": tier5_constants.SCHEDULE_BASIS,
+        },
+        "not_for_clinical_use": tier5_constants.NOT_FOR_CLINICAL_USE,
+    }
 
 
 @app.get("/api/me/stats")
