@@ -17,6 +17,25 @@ Guided by Prof. Neha Saini and Prof. Neelam Yadav
 
 ---
 
+## Screenshots
+
+Captured from the running app (sample patient, HLA-A*02:01).
+
+| | |
+|---|---|
+| ![Landing](docs/screenshots/01-landing.png) | ![Sign in](docs/screenshots/02-sign-in.png) |
+| ![Upload](docs/screenshots/03-upload.png) | ![History](docs/screenshots/07-history.png) |
+
+Full results page (ranked targets, mRNA, copilot):
+
+![Results](docs/screenshots/04-results.png)
+
+Formulation worksheet:
+
+![Formulation](docs/screenshots/06-formulation.png)
+
+---
+
 ## What it does
 
 | Tier | Stage | Output |
