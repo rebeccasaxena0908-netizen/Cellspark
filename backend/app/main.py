@@ -21,7 +21,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from . import auth, records
+from . import auth, records, storage
 from .db import get_db
 from .models import Researcher
 from .pipeline import run_pipeline, run_tier1
@@ -33,7 +33,7 @@ from .tier4.copilot import (
 from .tier4.retriever import corpus_info
 from .tier5 import constants as tier5_constants
 from .tier5.formulate import FormulationError, export_document, formulate
-from .upload import describe_upload, save_upload, sha256_hex, upload_id_for
+from .upload import describe_upload, local_copy, save_upload, sha256_hex, upload_id_for
 
 logger = logging.getLogger("cellspark.api")
 
@@ -84,6 +84,12 @@ async def database_error(request: Request, exc: SQLAlchemyError):
         status_code=503,
         content={"detail": "The database is unavailable. Try again shortly."},
     )
+
+
+@app.exception_handler(storage.StorageError)
+async def storage_error(request: Request, exc: storage.StorageError):
+    """S3 unreachable or credentials expired: a plain 503 with the fix."""
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 # ------------------------------------------------------------ schemas
@@ -183,14 +189,56 @@ class LoginRequest(BaseModel):
 
 
 # ------------------------------------------------------------ routes
-@app.get("/")
-def root():
-    return {"service": "CellSpark API", "docs": "/docs", "health": "/api/health"}
+# With SERVE_FRONTEND=1 (the EC2 deployment) this app also serves the built
+# frontend, so "/" must be the page rather than the API banner.
+SERVE_FRONTEND = os.environ.get("SERVE_FRONTEND") == "1"
+FRONTEND_DIST = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
+
+if not SERVE_FRONTEND:
+    @app.get("/")
+    def root():
+        return {"service": "CellSpark API", "docs": "/docs", "health": "/api/health"}
 
 
 @app.get("/api/health")
 def health():
     return {"status": "ok", "service": "cellspark", "version": "0.4.0"}
+
+
+@app.get("/api/health/storage")
+def health_storage():
+    """
+    Where this instance keeps its data. Public like /api/health, and carries
+    no credential: host names and a bucket name only.
+    """
+    db_host = os.environ.get("MYSQL_HOST") or None
+    db_ok = False
+    try:
+        import pymysql
+        conn = pymysql.connect(
+            host=db_host, port=int(os.environ.get("MYSQL_PORT") or 3306),
+            user=os.environ.get("MYSQL_USER"), password=os.environ.get("MYSQL_PASSWORD"),
+            database=os.environ.get("MYSQL_DB"), connect_timeout=3)
+        conn.close()
+        db_ok = True
+    except Exception:
+        pass            # reachable stays false; the reason can name a host or user
+
+    try:
+        backend, store_ok = storage.backend_name(), storage.reachable()
+    except storage.StorageError:
+        backend, store_ok = "invalid", False
+    return {
+        "database": {"host": db_host, "reachable": db_ok},
+        "storage": {
+            "backend": backend,
+            "bucket": storage.bucket_name() if backend == "s3" else None,
+            "reachable": store_ok,
+        },
+        "serving_frontend": SERVE_FRONTEND,
+        "instance": "ec2" if os.environ.get("INSTANCE_LABEL") == "ec2" else "local",
+    }
 
 
 # Everything below requires a signed-in researcher, and everything that names
@@ -242,12 +290,16 @@ async def upload_file(
     try:
         existing = records.find_file(db, rid, digest)
         if existing:
-            if os.path.exists(existing.stored_path):
-                info = describe_upload(existing.stored_path, existing.original_name, len(content))
+            if storage.exists(existing.stored_path):
+                info = describe_upload(local_copy(existing.stored_path),
+                                       existing.original_name, len(content))
             else:
                 # Same bytes as before, but the stored copy has gone missing.
                 # Put them back where the row says they are.
                 info = save_upload(existing.original_name, content, dest_path=existing.stored_path)
+                if info["stored_path"] != existing.stored_path:
+                    existing.stored_path = info["stored_path"][:500]
+                    db.commit()
             row, created = existing, False
         else:
             info = save_upload(file.filename, content, owner=rid)
@@ -263,15 +315,15 @@ async def upload_file(
                 db.commit()
             except Exception:
                 db.rollback()
-                os.remove(info["stored_path"])
+                storage.delete(info["stored_path"])
                 raise
             if not created:
                 # Lost a race with an identical upload; keep the winner's copy.
-                os.remove(info["stored_path"])
+                storage.delete(info["stored_path"])
     except ValueError as e:
         # user-fixable problem — 400, with the reason
         raise HTTPException(status_code=400, detail=str(e))
-    except SQLAlchemyError:
+    except (SQLAlchemyError, storage.StorageError):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
@@ -321,12 +373,13 @@ def pipeline_run(
         mfile = records.get_owned_file(db, rid, file_id)
         if mfile is None:
             raise HTTPException(status_code=404, detail=NOT_FOUND_UPLOAD)
-        if not os.path.exists(mfile.stored_path):
+        if not storage.exists(mfile.stored_path):
             raise HTTPException(
                 status_code=404,
                 detail="The uploaded file has expired from temporary storage. Upload it again.",
             )
-        disk_upload_id = upload_id_for(mfile.stored_path)
+        # The pipeline reads from disk; an s3:// upload is fetched to a local copy.
+        disk_upload_id = upload_id_for(local_copy(mfile.stored_path))
     else:
         mfile = records.demo_file(db, rid)
         disk_upload_id = None
@@ -820,3 +873,25 @@ def auth_logout(request: Request, response: Response, db: Session = Depends(get_
 @app.get("/api/auth/me")
 def auth_me(researcher: Researcher = Depends(auth.require_researcher)):
     return auth.public_profile(researcher)
+
+
+# ------------------------------------------------------------ frontend
+# Registered last so every API route above keeps priority. Same origin as the
+# API, which is what makes the session cookie correct without any change.
+if SERVE_FRONTEND:
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")),
+              name="assets")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def frontend(path: str):
+        if path == "api" or path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        # Files copied from frontend/public (favicon, video) sit in dist/ itself.
+        candidate = os.path.realpath(os.path.join(FRONTEND_DIST, path))
+        root = os.path.realpath(FRONTEND_DIST)
+        if path and candidate.startswith(root + os.sep) and os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse(os.path.join(FRONTEND_DIST, "index.html"))

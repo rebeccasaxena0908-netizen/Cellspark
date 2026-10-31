@@ -40,6 +40,7 @@ from .models import (
     PredictedTarget,
     RunAllele,
 )
+from . import storage
 from .upload import sha256_hex
 
 logger = logging.getLogger("cellspark.records")
@@ -151,6 +152,7 @@ def _ensure_demo_copy() -> Tuple[str, bytes, str]:
     written here is the same file the pipeline reads — just at a path that
     survives a restart, which is what the mutation_file row records.
     """
+    from . import upload
     from .pipeline import _get_demo        # deferred: pipeline imports heavy ML code
 
     _, (_, maf_path, _, _) = _get_demo()
@@ -158,17 +160,12 @@ def _ensure_demo_copy() -> Tuple[str, bytes, str]:
         content = fh.read()
     digest = sha256_hex(content)
 
-    path = demo_path()
+    path = storage.key_for(demo_path(), upload.UPLOAD_DIR, "uploads")
     current = None
-    if os.path.exists(path):
-        with open(path, "rb") as fh:
-            current = sha256_hex(fh.read())
+    if storage.exists(path):
+        current = sha256_hex(storage.load(path))
     if current != digest:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".part"
-        with open(tmp, "wb") as fh:
-            fh.write(content)
-        os.replace(tmp, path)
+        path = storage.save(path, content)
     return path, content, digest
 
 
@@ -182,6 +179,7 @@ def demo_file(db: Session, researcher_id: int) -> MutationFile:
     reused after. A row written before Phase 3 points into a temp folder that
     no longer exists; it is repointed at the permanent copy here.
     """
+    from . import upload
     from .tier1.maf_parser import load_maf
 
     path, content, digest = _ensure_demo_copy()
@@ -199,9 +197,18 @@ def demo_file(db: Session, researcher_id: int) -> MutationFile:
         stored_path=path,
         sha256=digest,
         size_bytes=len(content),
-        mutation_count=len(load_maf(path)),
+        mutation_count=len(load_maf(upload.local_copy(path))),
     )
     return row
+
+
+def _is_available(locator: str) -> bool:
+    """Is the stored file there? An unreachable S3 counts as 'not available'
+    here, so a history list never fails because credentials expired."""
+    try:
+        return storage.exists(locator)
+    except storage.StorageError:
+        return False
 
 
 # ---------------------------------------------------------------- runs
@@ -240,26 +247,23 @@ def result_path_for(run_id: int) -> str:
 
 def write_result(run_id: int, result: Dict[str, Any]) -> str:
     """
-    Write the result JSON and return its path.
+    Store the result JSON and return its locator (a path, or s3://...).
 
-    Written to a temp name and renamed, so a crash mid-write never leaves a
-    truncated file that later reads as a corrupt result.
+    The local backend writes to a temp name and renames, so a crash mid-write
+    never leaves a truncated file that later reads as a corrupt result.
     """
-    path = result_path_for(run_id)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".part"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(result, fh, default=str)
-    os.replace(tmp, path)
-    return path
+    key = storage.key_for(result_path_for(run_id), RESULTS_DIR, "results")
+    data = json.dumps(result, default=str).encode("utf-8")
+    return storage.save(key, data)
 
 
 def load_result(run: PipelineRun) -> Optional[Dict[str, Any]]:
     """The stored result for a run, or None if there isn't a readable one."""
     path = run.result_path or result_path_for(run.run_id)
     try:
-        with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
+        return json.loads(storage.load(path).decode("utf-8"))
+    except storage.StorageError:
+        raise                       # surfaced as a 503 with the readable message
     except (OSError, ValueError):
         return None
 
@@ -530,7 +534,7 @@ def list_runs(db: Session, researcher_id: int, limit: int, offset: int) -> Dict[
             "file_name": r["original_name"],
             # Computed, not stored: the schema has no column for it and the
             # application user cannot add one. A stat per row, not a query.
-            "file_available": bool(r["stored_path"]) and os.path.exists(r["stored_path"]),
+            "file_available": bool(r["stored_path"]) and _is_available(r["stored_path"]),
             "alleles": r["alleles"].split(",") if r["alleles"] else [],
             "top_gene": r["top_gene"],
             "top_peptide": r["top_peptide"],
@@ -552,7 +556,7 @@ def run_detail(db: Session, run: PipelineRun) -> Dict[str, Any]:
     return {
         **run_summary(run),
         "file_name": mfile.original_name if mfile else None,
-        "file_available": bool(mfile and os.path.exists(mfile.stored_path)),
+        "file_available": bool(mfile and _is_available(mfile.stored_path)),
         "result_available": result is not None,
         "result": result,
     }
@@ -644,20 +648,30 @@ def delete_run(db: Session, run: PipelineRun) -> Optional[str]:
 
 
 def remove_result_file(path: Optional[str]) -> None:
-    """Remove a result file, but only one inside RESULTS_DIR."""
+    """
+    Remove a result document through the storage adapter.
+
+    Only objects this app writes are removable: a file inside RESULTS_DIR, or
+    an s3:// object under results/ in the configured bucket.
+    """
     if not path:
         return
-    root = os.path.realpath(RESULTS_DIR)
-    real = os.path.realpath(path)
-    if os.path.commonpath([root, real]) != root:
-        logger.warning("Refusing to delete result file outside %s: %s", root, path)
-        return
+    if storage.is_s3(path):
+        bucket, _, key = path[len(storage.S3_SCHEME):].partition("/")
+        if bucket != storage.bucket_name() or not key.startswith("results/"):
+            logger.warning("Refusing to delete result object outside results/: %s", path)
+            return
+        target = path
+    else:
+        root = os.path.realpath(RESULTS_DIR)
+        target = os.path.realpath(path)
+        if os.path.commonpath([root, target]) != root:
+            logger.warning("Refusing to delete result file outside %s: %s", root, path)
+            return
     try:
-        os.remove(real)
-    except FileNotFoundError:
-        pass
+        storage.delete(target)
     except OSError:
-        logger.exception("Could not delete result file %s", real)
+        logger.exception("Could not delete result file %s", target)
 
 
 _STATS_SQL = text("""

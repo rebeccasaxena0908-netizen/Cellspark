@@ -21,6 +21,7 @@ import tempfile
 import uuid
 from typing import Dict, Any, Optional
 
+from . import storage
 from .tier1.maf_parser import load_maf
 
 # Permanent, per researcher: data/uploads/<researcher_id>/<upload_id>_<name>.
@@ -101,36 +102,42 @@ def save_upload(filename: str, content: bytes, dest_path: str = None,
         raise ValueError("File is empty.")
 
     safe_name = os.path.basename(filename or "") or "upload.maf"
-    if dest_path is None:
-        upload_id = uuid.uuid4().hex[:12]
-        folder = os.path.join(UPLOAD_DIR, str(owner)) if owner is not None else UPLOAD_DIR
-        path = os.path.join(folder, f"{upload_id}_{safe_name}")
-    else:
-        path = dest_path
+    target = None       # a known location to rewrite in place
+    if dest_path is not None and (storage.is_s3(dest_path) or storage.backend_name() == "local"):
+        target = dest_path
         upload_id = upload_id_for(dest_path)
+    else:
+        # A new file, or a legacy local row being re-saved while STORAGE=s3
+        # (its fresh copy goes to S3 and the caller repoints the row).
+        upload_id = upload_id_for(dest_path) if dest_path else uuid.uuid4().hex[:12]
+        folder = os.path.join(UPLOAD_DIR, str(owner)) if owner is not None else UPLOAD_DIR
+        key = storage.key_for(os.path.join(folder, f"{upload_id}_{safe_name}"),
+                              UPLOAD_DIR, "uploads")
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as fh:
-        fh.write(content)
-
-    # Parse now so problems surface here rather than mid-pipeline
+    # Parse a local scratch copy first so problems surface here, before
+    # anything is stored. The parser needs a real file; S3 has none.
+    fd, scratch = tempfile.mkstemp(suffix=".maf")
     try:
-        info = describe_upload(path, safe_name, len(content))
-    except ValueError:
-        os.remove(path)
-        raise
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(content)
+        info = describe_upload(scratch, safe_name, len(content))
+    finally:
+        os.remove(scratch)
+
+    locator = storage.save_at(target, content) if target else storage.save(key, content)
 
     return {
         "upload_id": upload_id,
         **info,
-        "stored_path": path,
+        "stored_path": locator,
         "sha256": sha256_hex(content),
     }
 
 
 def upload_id_for(stored_path: str) -> str:
     """The upload_id a stored file was saved under — the prefix before '_'."""
-    return os.path.basename(stored_path).split("_", 1)[0]
+    return stored_path.rsplit("/", 1)[-1].split("_", 1)[0] if storage.is_s3(stored_path) \
+        else os.path.basename(stored_path).split("_", 1)[0]
 
 
 def get_upload_path(upload_id: str) -> str:
@@ -151,3 +158,25 @@ def get_upload_path(upload_id: str) -> str:
             if hits:
                 return hits[0]
     raise FileNotFoundError(f"Upload {upload_id} not found — it may have been removed.")
+
+
+def local_copy(stored_path: str) -> str:
+    """
+    A readable local path for a stored upload, for the parser and pipeline.
+
+    A filesystem path is returned as it is. An s3:// object is fetched once
+    into UPLOAD_DIR/_s3cache/, where get_upload_path() finds it by upload id
+    like any other file. Raises FileNotFoundError if the object is gone and
+    StorageError if S3 can't be reached.
+    """
+    if not storage.is_s3(stored_path):
+        return stored_path
+    path = os.path.join(UPLOAD_DIR, "_s3cache", stored_path.rsplit("/", 1)[-1])
+    if not os.path.exists(path):
+        data = storage.load(stored_path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".part"
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+    return path
