@@ -1,0 +1,24 @@
+# systemd unit for CellSpark on EC2.
+#
+#   sudo cp deploy/cellspark.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cellspark
+#   journalctl -u cellspark -f
+#
+# backend/.env must define APP_PORT (and SERVE_FRONTEND=1 to serve the UI).
+# systemd expands ${APP_PORT} from the EnvironmentFile below.
+[Unit]
+Description=CellSpark API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ec2-user
+WorkingDirectory=/home/ec2-user/cellspark/backend
+EnvironmentFile=/home/ec2-user/cellspark/backend/.env
+ExecStart=/home/ec2-user/cellspark/backend/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
