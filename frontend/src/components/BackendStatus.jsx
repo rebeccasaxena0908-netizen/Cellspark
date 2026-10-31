@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { checkHealth } from "../lib/api";
+import { checkHealth, checkStorageHealth } from "../lib/api";
 
 /**
  * Live backend indicator.
@@ -10,6 +10,7 @@ import { checkHealth } from "../lib/api";
 export default function BackendStatus() {
   const [state, setState] = useState("checking");   // checking | online | offline
   const [version, setVersion] = useState(null);
+  const [where, setWhere] = useState(null);         // { db, storage, ok } from /health/storage
 
   useEffect(() => {
     let cancelled = false;
@@ -20,6 +21,19 @@ export default function BackendStatus() {
         if (!cancelled) {
           setState("online");
           setVersion(data.version);
+        }
+        // Informational only: a failure here must never mark the server offline.
+        try {
+          const s = await checkStorageHealth();
+          if (!cancelled) {
+            setWhere({
+              db: s.database.host,
+              storage: s.storage.backend,
+              ok: s.database.reachable && s.storage.reachable,
+            });
+          }
+        } catch {
+          if (!cancelled) setWhere(null);
         }
       } catch {
         if (!cancelled) setState("offline");
@@ -33,7 +47,8 @@ export default function BackendStatus() {
 
   const config = {
     checking: { dot: "bg-ink-mute", text: "Checking analysis server" },
-    online:   { dot: "bg-ok",       text: `Analysis server ready${version ? ` · v${version}` : ""}` },
+    online:   { dot: where && !where.ok ? "bg-alert" : "bg-ok",
+                text: `Analysis server ready${version ? ` · v${version}` : ""}` },
     offline:  { dot: "bg-alert",    text: "Analysis server unreachable" },
   }[state];
 
@@ -44,6 +59,11 @@ export default function BackendStatus() {
     >
       <span className={`h-2 w-2 rounded-full ${config.dot} ${state === "online" ? "cs-pulse" : ""}`} />
       {config.text}
+      {state === "online" && where && (
+        <span className="hidden md:inline" title={where.ok ? "Database and storage reachable" : "Database or storage unreachable"}>
+          · db {where.db || "unset"} · {where.storage} storage
+        </span>
+      )}
     </span>
   );
 }

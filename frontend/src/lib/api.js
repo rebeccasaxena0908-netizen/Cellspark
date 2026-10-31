@@ -54,6 +54,11 @@ export function checkHealth() {
   return request("/health");
 }
 
+/** Where the server keeps its data: database host and storage backend. No secrets. */
+export function checkStorageHealth() {
+  return request("/health/storage");
+}
+
 export function runTier1({ algorithm = "kmp", maxMutations = 30 } = {}) {
   return request(`/tier1/run?algorithm=${algorithm}&max_mutations=${maxMutations}`);
 }
