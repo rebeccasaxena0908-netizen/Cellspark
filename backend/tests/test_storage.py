@@ -41,7 +41,7 @@ class FakeS3:
 
 class ExpiredS3(FakeS3):
     def put_object(self, **kw):
-        raise _client_error("ExpiredToken", "AKIASECRETKEYID token=FQoGZXIvYXdzSECRET")
+        raise _client_error("ExpiredToken", "FAKE-KEY-ID token=FAKE-TOKEN")
 
     get_object = head_object = delete_object = head_bucket = put_object
 
@@ -139,7 +139,7 @@ def test_s3_failure_is_a_readable_message_without_secrets(monkeypatch):
         msg = str(exc.value)
         assert msg == storage.UNAVAILABLE
         assert "Set STORAGE=local" in msg
-        assert "AKIA" not in msg and "FQoG" not in msg
+        assert "FAKE-" not in msg
         assert exc.value.__cause__ is None   # no chained AWS error to leak
         with pytest.raises(storage.StorageError):
             storage.load("s3://test-bucket/x")
@@ -201,7 +201,7 @@ def test_health_storage_has_no_secrets(monkeypatch):
     from fastapi.testclient import TestClient
     from app.main import app
     client = TestClient(app)
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAFAKEKEYFORTEST")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "FAKE-KEY-ID-FOR-TEST")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "fakesecretvalue123")
     monkeypatch.setenv("AWS_SESSION_TOKEN", "faketokenvalue456")
     r = client.get("/api/health/storage")
@@ -211,7 +211,7 @@ def test_health_storage_has_no_secrets(monkeypatch):
     assert body["storage"]["backend"] == "local"
     assert body["instance"] == "local"
     text = r.text
-    for secret in ("AKIAFAKEKEYFORTEST", "fakesecretvalue123", "faketokenvalue456",
+    for secret in ("FAKE-KEY-ID-FOR-TEST", "fakesecretvalue123", "faketokenvalue456",
                    os.environ.get("MYSQL_PASSWORD") or "\0never"):
         assert secret not in text
 
